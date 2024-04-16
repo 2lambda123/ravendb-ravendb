@@ -64,7 +64,6 @@ namespace Voron.Data.BTrees
             }
 
             _recentlyFoundPages = FoundPagesPool.Allocate();
-
             _state = new TreeMutableState(llt, in header);
 
             llt.RegisterDisposable(new TreeDisposable(this));
@@ -95,9 +94,6 @@ namespace Voron.Data.BTrees
             Name = name;
 
             _recentlyFoundPages = FoundPagesPool.Allocate();
-
-
-            _state = new TreeMutableState(llt, state);
             _state = state;
 
             llt.RegisterDisposable(new TreeDisposable(this));
@@ -1496,7 +1492,9 @@ namespace Voron.Data.BTrees
             // RavenDB-22261: It may happen that the FixedSizeTree requested does not exist, and if it does not
             // it would still return an instance. This is a workaround because the check in debug is correct.
             // https://issues.hibernatingrhinos.com/issue/RavenDB-22261/Inconsistency-in-Tree-external-API
-            Debug.Assert(fixedTree.NumberOfEntries == 0 || State.Header.Flags.HasFlag(TreeFlags.FixedSizeTrees));
+            Debug.Assert(fixedTree.NumberOfEntries == 0 || 
+                         fixedTree.Type == RootObjectType.EmbeddedFixedSizeTree || 
+                         State.Header.Flags.HasFlag(TreeFlags.FixedSizeTrees));
 
             return fixedTree;
         }
