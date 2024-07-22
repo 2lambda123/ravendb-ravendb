@@ -187,8 +187,12 @@ namespace Raven.Server.ServerWide
             [nameof(UpdateResponsibleNodeForTasksCommand)] = UpdateResponsibleNodeForTasksCommand.CommandVersion,
             [nameof(AddPrefixedShardingSettingCommand)] = 61_000,
             [nameof(DeletePrefixedShardingSettingCommand)] = 61_000,
-            [nameof(UpdatePrefixedShardingSettingCommand)] = 61_000
+            [nameof(UpdatePrefixedShardingSettingCommand)] = 61_000,
 
+            [nameof(AddSnowflakeEtlCommand)] = 61_000,
+            [nameof(UpdateSnowflakeEtlCommand)] = 61_000,
+            [nameof(PutSnowflakeConnectionStringCommand)] = 61_000,
+            [nameof(RemoveSnowflakeConnectionStringCommand)] = 61_000,
         };
 
         public bool CanPutCommand(string command)
