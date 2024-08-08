@@ -39,9 +39,7 @@ using Raven.Server.Documents.ETL.Providers.ElasticSearch.Test;
 using Raven.Server.Documents.ETL.Providers.OLAP.Test;
 using Raven.Server.Documents.ETL.Providers.Queue.Test;
 using Raven.Server.Documents.ETL.Providers.Raven.Test;
-using Raven.Server.Documents.ETL.Providers.RelationalDatabase;
 using Raven.Server.Documents.ETL.Providers.RelationalDatabase.Common;
-using Raven.Server.Documents.ETL.Providers.SQL.RelationalWriters;
 using Raven.Server.Documents.Handlers;
 using Raven.Server.Documents.Handlers.Debugging;
 using Raven.Server.Documents.Handlers.Processors.Replication;
@@ -76,12 +74,10 @@ using FacetSetup = Raven.Client.Documents.Queries.Facets.FacetSetup;
 using Raven.Server.EventListener;
 using Raven.Server.NotificationCenter;
 using Raven.Server.Documents.QueueSink.Test;
-using Raven.Server.Documents.Sharding.Handlers.Processors;
 using BackupConfiguration = Raven.Client.Documents.Operations.Backups.BackupConfiguration;
 using DatabasesInfo = Raven.Client.ServerWide.Operations.DatabasesInfo;
 using MigrationConfiguration = Raven.Server.Smuggler.Migration.MigrationConfiguration;
 using StudioConfiguration = Raven.Client.Documents.Operations.Configuration.StudioConfiguration;
-using Raven.Server.Documents.Handlers.Processors.Stats;
 
 namespace Raven.Server.Json
 {
