@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -8,16 +8,19 @@ using Sparrow.Binary;
 using Sparrow.Global;
 using Sparrow.Platform;
 using Sparrow.Threading;
+using Sparrow.Utils;
+
+using static Sparrow.DisposableExceptions;
+using static Sparrow.PortableExceptions;
 
 #if MEM_GUARD
 using Sparrow.Platform;
 #endif
 
-using Sparrow.Utils;
 
 namespace Sparrow.Json
 {
-    public sealed unsafe class ArenaMemoryAllocator : IDisposable
+    public sealed unsafe class ArenaMemoryAllocator : IDisposableQueryable, IDisposable
     {
         internal const int MaxArenaSize = 1024 * 1024 * 1024;
         private static readonly int? SingleAllocationSizeLimit = PlatformDetails.Is32Bits ? 8 * Constants.Size.Megabyte : (int?)null;
@@ -40,15 +43,13 @@ namespace Sparrow.Json
 
         private readonly FreeSection*[] _freed = new FreeSection*[32];
 
-        private readonly SingleUseFlag _isDisposed = new SingleUseFlag();
+        private readonly SingleUseFlag _isDisposed = new();
         private NativeMemory.ThreadStats _allocatingThread;
         private readonly int _initialSize;
 
         public long TotalUsed;
 
         public bool AvoidOverAllocation;
-
-        private readonly SharedMultipleUseFlag _lowMemoryFlag;
 
         public long Allocated
         {
@@ -73,7 +74,6 @@ namespace Sparrow.Json
             _allocated = initialSize;
             _used = 0;
             TotalUsed = 0;
-            _lowMemoryFlag = lowMemoryFlag;
         }
 
         public bool GrowAllocation(AllocatedMemoryData allocation, int sizeIncrease)
@@ -115,12 +115,14 @@ namespace Sparrow.Json
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public AllocatedMemoryData Allocate(int size)
         {
-            if (_isDisposed ?? true)
-                goto ErrorDisposed;
+            ThrowIfDisposed(this);
 
-            if (_ptrStart == null)
-                goto ErrorResetted;
-
+            ThrowIfNull<InvalidOperationException>(_ptrStart, "Attempt to allocate from reset arena without calling renew");
+            ThrowIf<ArgumentOutOfRangeException>(size < 0, "Size cannot be negative");
+            
+            if (size > MaxArenaSize)
+                Throw<ArgumentOutOfRangeException>($"Requested size {size} while maximum size is {MaxArenaSize}");
+            
 #if MEM_GUARD
             return new AllocatedMemoryData
             {
@@ -128,17 +130,8 @@ namespace Sparrow.Json
                 SizeInBytes = size
             };
 #else
-            if (size < 0)
-                throw new ArgumentOutOfRangeException(nameof(size), size,
-                    $"Size cannot be negative");
-
-            if (size > MaxArenaSize)
-                throw new ArgumentOutOfRangeException(nameof(size), size,
-                    $"Requested size {size} while maximum size is {MaxArenaSize}");
-
+            
             size = Bits.PowerOf2(Math.Max(sizeof(FreeSection), size));
-
-            AllocatedMemoryData allocation;
 
             var index = Bits.MostSignificantBit(size) - 1;
             if (_freed[index] != null)
@@ -146,8 +139,7 @@ namespace Sparrow.Json
                 var section = _freed[index];
                 _freed[index] = section->Previous;
 
-                allocation = new AllocatedMemoryData((byte*)section, section->SizeInBytes);
-                goto Return;
+                return new AllocatedMemoryData((byte*)section, section->SizeInBytes);
             }
 
             if (_used + size > _allocated)
@@ -155,41 +147,21 @@ namespace Sparrow.Json
                 GrowArena(size);
             }
 
-            allocation = new AllocatedMemoryData(_ptrCurrent, size);
+            AllocatedMemoryData allocation = new(_ptrCurrent, size);
 
             _ptrCurrent += size;
             _used += size;
             TotalUsed += size;
 
-        Return:
             return allocation;
 #endif
-
-        ErrorDisposed:
-            ThrowAlreadyDisposedException();
-        ErrorResetted:
-            ThrowInvalidAllocateFromResetWithoutRenew();
-            return null; // Will never happen.
-        }
-
-        private static void ThrowInvalidAllocateFromResetWithoutRenew()
-        {
-            throw new InvalidOperationException("Attempt to allocate from reset arena without calling renew");
-        }
-
-        private void ThrowAlreadyDisposedException()
-        {
-            throw new ObjectDisposedException("This ArenaMemoryAllocator is already disposed");
         }
 
         private void GrowArena(int requestedSize)
         {
-            if (requestedSize > MaxArenaSize)
-                throw new ArgumentOutOfRangeException(nameof(requestedSize), requestedSize,
-                    $"Requested arena resize to {requestedSize} while current size is {_allocated} and maximum size is {MaxArenaSize}");
-
+            ThrowIf<ArgumentOutOfRangeException>(requestedSize > MaxArenaSize, $"Requested arena resize to {requestedSize} while current size is {_allocated} and maximum size is {MaxArenaSize}");
+            
             long newSize = GetPreferredSize(requestedSize);
-
             if (newSize > MaxArenaSize)
                 newSize = MaxArenaSize;
 
@@ -208,8 +180,7 @@ namespace Sparrow.Json
             }
 
             // Save the old buffer pointer to be released when the arena is reset
-            if (_olderBuffers == null)
-                _olderBuffers = new List<Tuple<IntPtr, long, NativeMemory.ThreadStats>>();
+            _olderBuffers ??= new List<Tuple<IntPtr, long, NativeMemory.ThreadStats>>();
             _olderBuffers.Add(Tuple.Create(new IntPtr(_ptrStart), _allocated, _allocatingThread));
 
             _allocatingThread = thread;
@@ -367,11 +338,12 @@ namespace Sparrow.Json
             }
         }
 
+        public bool IsDisposed => _isDisposed ?? true;
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Return(AllocatedMemoryData allocation)
         {
-            if (_isDisposed ?? true)
-                return;
+            if (IsDisposed) return;
 
             var address = allocation.Address;
 
@@ -436,7 +408,7 @@ namespace Sparrow.Json
         }
     }
 
-    public sealed unsafe class AllocatedMemoryData
+    public sealed unsafe class AllocatedMemoryData : IDisposableQueryable
     {
         public int SizeInBytes;
         public int ContextGeneration;
@@ -461,40 +433,31 @@ namespace Sparrow.Json
 
 #if !DEBUG
         public readonly byte* Address;
+        bool IDisposableQueryable.IsDisposed => false;
 #else
         public bool IsLongLived;
         public bool IsReturned;
 
         private byte* _address;
 
+        bool IDisposableQueryable.IsDisposed => IsLongLived == false &&
+                                                Parent != null &&
+                                                ContextGeneration != Parent.Generation ||
+                                                IsReturned;
+
         public byte* Address
         {
             get
             {
-                if (IsLongLived == false &&
-                    Parent != null &&
-                    ContextGeneration != Parent.Generation ||
-                    IsReturned)
-                    ThrowObjectDisposedException();
-
+                ThrowIfDisposed(this);
                 return _address;
             }
 
             private set
             {
-                if (IsLongLived == false &&
-                    Parent != null &&
-                    ContextGeneration != Parent.Generation ||
-                    IsReturned)
-                    ThrowObjectDisposedException();
-
+                ThrowIfDisposed(this);
                 _address = value;
             }
-        }
-
-        private void ThrowObjectDisposedException()
-        {
-            throw new ObjectDisposedException(nameof(AllocatedMemoryData));
         }
 
 #endif
@@ -513,7 +476,7 @@ namespace Sparrow.Json
 
         public override Memory<byte> Memory => CreateMemory(_length);
 
-        public override Span<byte> GetSpan() => new Span<byte>(_address, _length);
+        public override Span<byte> GetSpan() => new(_address, _length);
 
         public override MemoryHandle Pin(int elementIndex = 0)
         {
