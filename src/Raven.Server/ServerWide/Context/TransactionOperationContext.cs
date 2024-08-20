@@ -168,9 +168,9 @@ namespace Raven.Server.ServerWide.Context
 
         protected abstract TTransaction CloneReadTransaction(TTransaction previous);
 
-        public override long AllocatedMemory => _arenaAllocator.Allocated + Allocator._totalAllocated;
+        public override long AllocatedMemory => ArenaAllocator.Allocated + Allocator._totalAllocated;
 
-        public override long UsedMemory => _arenaAllocator.TotalUsed + Allocator._currentlyAllocated;
+        public override long UsedMemory => ArenaAllocator.TotalUsed + Allocator._currentlyAllocated;
 
         public bool HasTransaction => Transaction != null && Transaction.Disposed == false;
 
@@ -254,13 +254,7 @@ namespace Raven.Server.ServerWide.Context
         {
             base.Renew();
 
-            if (_allocatedChangeVectors == null)
-            {
-                if (ChangeVector.PerCoreChangeVectors.TryPull(out _allocatedChangeVectors) == false)
-                    _allocatedChangeVectors = new FastList<ChangeVector>(256);
-
-                _numberOfAllocatedChangeVectors = 0;
-            }
+            _numberOfAllocatedChangeVectors = 0;
         }
 
         protected internal override void Reset(bool forceResetLongLivedAllocator = false)
@@ -271,15 +265,7 @@ namespace Raven.Server.ServerWide.Context
 
             Allocator.Reset();
 
-            if (_allocatedChangeVectors != null)
-            {
-                if (ChangeVector.PerCoreChangeVectors.TryPush(_allocatedChangeVectors) == false)
-                {
-                    // GC will take care of this
-                }
-
-                _allocatedChangeVectors = null;
-            }
+            _numberOfAllocatedChangeVectors = 0;
         }
 
         public ChangeVector GetChangeVector(string changeVector) => GetChangeVector(changeVector, throwOnRecursion: false);

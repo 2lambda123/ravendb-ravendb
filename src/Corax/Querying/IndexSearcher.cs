@@ -98,8 +98,8 @@ public sealed unsafe partial class IndexSearcher : IDisposable
         _entriesToTermsTree = _transaction.ReadTree(Constants.IndexWriter.EntriesToTermsSlice);
         _metadataTree = _transaction.ReadTree(Constants.IndexMetadataSlice);
         _multipleTermsInField = _transaction.ReadTree(Constants.IndexWriter.MultipleTermsInField);
-        _entryIdToLocation = _transaction.LookupFor<Int64LookupKey>(Constants.IndexWriter.EntryIdToLocationSlice);
-        _dictionaryId = CompactTree.GetDictionaryId(_transaction.LowLevelTransaction);
+        _transaction.TryGetLookupFor(Constants.IndexWriter.EntryIdToLocationSlice, out _entryIdToLocation);
+        _dictionaryId = GetDictionaryId(_transaction.LowLevelTransaction);
         FieldCache = new FieldsCache(_transaction, _fieldsTree);
     }
 
@@ -116,8 +116,8 @@ public sealed unsafe partial class IndexSearcher : IDisposable
             _fieldMapping = fieldsMapping;
         }
     }
-    
-    public EntryTermsReader GetEntryTermsReader(long id, ref Page p)
+
+    public void GetEntryTermsReader(long id, ref Page p, out EntryTermsReader reader, CompactKey existingKey = null)
     {
         if (_entryIdToLocation.TryGetValue(id, out var loc) == false)
             throw new InvalidOperationException("Unable to find entry id: " + id);
@@ -127,11 +127,11 @@ public sealed unsafe partial class IndexSearcher : IDisposable
             _nullTermsMarkersLoaded = true;
             InitializeNullTermsMarkers();
         }
-        
+
         var item = Container.MaybeGetFromSamePage(_transaction.LowLevelTransaction, ref p, loc);
-        return new EntryTermsReader(_transaction.LowLevelTransaction, _nullTermsMarkers, item.Address, item.Length, _dictionaryId);
+        reader = new EntryTermsReader(_transaction.LowLevelTransaction, _nullTermsMarkers, item.Address, item.Length, _dictionaryId, existingKey);
     }
-    
+
     internal void EncodeAndApplyAnalyzerForMultipleTerms(in FieldMetadata binding, ReadOnlySpan<char> term, ref ContextBoundNativeList<Slice> terms)
     {
         if (term.Length == 0 || term.SequenceEqual(Constants.EmptyStringCharSpan.Span))
@@ -212,7 +212,9 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     //Function used to generate Slice from query parameters.
     //We cannot dispose them before the whole query is executed because they are an integral part of IQueryMatch.
     //We know that the Slices are automatically disposed when the transaction is closed so we don't need to track them.
+#if !DEBUG
     [SkipLocalsInit]
+#endif
     public Slice EncodeAndApplyAnalyzer(in FieldMetadata binding, string term)
     {
         if (term is null)
@@ -325,15 +327,18 @@ public sealed unsafe partial class IndexSearcher : IDisposable
 
    public long GetDictionaryIdFor(Slice field)
    {
-       var terms = _fieldsTree?.CompactTreeFor(field);
-       return terms?.DictionaryId ?? -1;
+       if (_fieldsTree == null || _fieldsTree.TryGetCompactTreeFor(field, out var terms) == false)
+            return -1;
+
+       return terms.DictionaryId;
    }
    
     public long GetTermAmountInField(in FieldMetadata field)
     {
-        var terms = _fieldsTree?.CompactTreeFor(field.FieldName);
-
-        return terms?.NumberOfEntries ?? 0;
+        if (_fieldsTree == null || _fieldsTree.TryGetCompactTreeFor(field.FieldName, out var terms) == false)
+            return 0;
+        
+        return terms.NumberOfEntries;
     }
 
     public bool TryGetTermsOfField(in FieldMetadata field, out ExistsTermProvider<Lookup<CompactKeyLookup>.ForwardIterator> existsTermProvider)
@@ -344,14 +349,12 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     public bool TryGetTermsOfField<TLookupIterator>(in FieldMetadata field, out ExistsTermProvider<TLookupIterator> existsTermProvider)
         where TLookupIterator : struct, ILookupIterator
     {
-        var terms = _fieldsTree?.CompactTreeFor(field.FieldName);
-
-        if (terms == null)
+        if (_fieldsTree == null || _fieldsTree.TryGetCompactTreeFor(field.FieldName, out var terms) == false)
         {
             existsTermProvider = default;
             return false;
         }
-
+        
         existsTermProvider = new ExistsTermProvider<TLookupIterator>(this, terms, field);
         return true;
     }
@@ -386,11 +389,11 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     public FieldIndexingMode GetFieldIndexingModeForDynamic(Slice name)
     {
         _persistedDynamicTreeAnalyzer ??= _transaction.ReadTree(Constants.IndexWriter.DynamicFieldsAnalyzersSlice);
-        var readResult = _persistedDynamicTreeAnalyzer?.Read(name);
-        if (readResult == null)
+
+        if (_persistedDynamicTreeAnalyzer.TryRead(name, out var reader) == false)
             return FieldIndexingMode.Normal;
 
-        var mode = (FieldIndexingMode)readResult.Reader.ReadByte();
+        var mode = (FieldIndexingMode)reader.Read<byte>();
         return mode;
     }
 
@@ -568,7 +571,7 @@ public sealed unsafe partial class IndexSearcher : IDisposable
             {
                 do
                 {
-                    (_, long nullTermId) = it.CreateReaderForCurrent().ReadStructure<(long, long)>();
+                    (_, long nullTermId) = it.CreateReaderForCurrent().Read<(long, long)>();
                     nullTermsMarkers.Add(nullTermId);
                 } while (it.MoveNext());
             }
@@ -578,11 +581,11 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     private long GetRootPageByFieldName(Slice fieldName)
     {
         var it = _fieldsTree.Iterate(false);
-        var result = _fieldsTree.Read(fieldName);
-        if (result is null)
+
+        if (_fieldsTree.TryRead(fieldName, out var reader) == false)
             return -1;
         
-        var state = (LookupState*)result.Reader.Base;
+        var state = (LookupState*)reader.Base;
         Debug.Assert(state->RootObjectType is RootObjectType.Lookup, "state->RootObjectType is RootObjectType.Lookup");
         return state->RootPage;
     }

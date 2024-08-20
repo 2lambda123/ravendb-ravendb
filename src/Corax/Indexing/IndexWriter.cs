@@ -452,14 +452,14 @@ namespace Corax.Indexing
         
         private void RecordTermDeletionsForEntry(Container.Item entryTerms, LowLevelTransaction llt, Dictionary<long, IndexedField> fieldsByRootPage, HashSet<long> nullTermMarkers, long dicId, long entryToDelete, int termsPerEntryIndex)
         {
-            var reader = new EntryTermsReader(llt, nullTermMarkers, entryTerms.Address, entryTerms.Length, dicId);
+            using var reader = new EntryTermsReader(llt, nullTermMarkers, entryTerms.Address, entryTerms.Length, dicId);
+            
             reader.Reset();
             while (reader.MoveNextStoredField())
             {
                 //Null/empty is not stored in container, just exists as marker.
                 if (reader.TermId == -1)
                     continue;
-                
                 
                 Container.Delete(llt, _storedFieldsContainerId, reader.TermId);
             }
@@ -468,7 +468,8 @@ namespace Corax.Indexing
             {
                 if (fieldsByRootPage.TryGetValue(reader.FieldRootPage, out var field) == false)
                 {
-                    ThrowUnableToFindMatchingField(reader);
+                    PortableExceptions.Throw<InvalidOperationException>(
+                        $"Unable to find matching field for {reader.FieldRootPage} with root page:  {reader.FieldRootPage}. Term: '{reader.Current}'");
                 }
 
                 if (reader.IsNull)
@@ -596,7 +597,9 @@ namespace Corax.Indexing
             if (_indexedEntries.Contains(termSlice) == false)
             {
                 _compactKeyScope.Key.Set(termSlice);
-                var exists = _fieldsTree.CompactTreeFor(_fieldsMapping.GetByFieldId(Constants.IndexWriter.PrimaryKeyFieldId).FieldName).TryGetValue(_compactKeyScope.Key, out var containerId);
+                var exists = _fieldsTree.CompactTreeFor(_fieldsMapping.GetByFieldId(Constants.IndexWriter.PrimaryKeyFieldId).FieldName)
+                                             .TryGetValue(_compactKeyScope.Key, out var containerId);
+                
                 if (exists)
                 {
                     // note that the containerId may be a single value or many(!), if it is many items
@@ -1506,21 +1509,23 @@ namespace Corax.Indexing
             {
                 // In the case where the field does not have any null values, we will create a *large* posting list (an empty one)
                 // then we'll insert data to it as if it was any other term
-                var entry = _writer._nullEntriesPostingLists.Read(_indexedField.Name);
-
-                if (entry != null)
+                if (_writer._nullEntriesPostingLists.TryRead(_indexedField.Name, out var reader))
                 {
                     Debug.Assert(sizeof(long) * 2 == sizeof((long, long)));
-                    Debug.Assert(entry.Reader.Length == sizeof((long, long)));
-                    return *((long,long)*)entry.Reader.Base;
+                    Debug.Assert(reader.Length == sizeof((long, long)));
+                    return *((long, long)*)reader.Base;
                 }
 
-                long setId = Container.Allocate(_writer._transaction.LowLevelTransaction, _writer._postingListContainerId, sizeof(PostingListState), out var setSpace);
+                long setId = Container.Allocate(_writer._transaction.LowLevelTransaction,
+                    _writer._postingListContainerId, 
+                    sizeof(PostingListState), out var setSpace);
 
                 _writer.InitializeFieldRootPage(_indexedField);
                 
-                long nullMarkerId = Container.Allocate(_writer._transaction.LowLevelTransaction, _writer._entriesTermsContainerId,
+                long nullMarkerId = Container.Allocate(
+                    _writer._transaction.LowLevelTransaction, _writer._entriesTermsContainerId,
                     1, _indexedField.FieldRootPage, out var nullBuffer);
+                
                 nullBuffer.Clear();
                 
                 // we need to account for the size of the posting lists, once a term has been switch to a posting list

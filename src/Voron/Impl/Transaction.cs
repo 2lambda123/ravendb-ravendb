@@ -2,14 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Sparrow;
+using Sparrow.Json;
+using Sparrow.Server;
 using Voron.Data;
 using Voron.Data.BTrees;
 using Voron.Data.Fixed;
 using Voron.Data.Tables;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-using Sparrow.Json;
-using Sparrow.Server;
 using Voron.Data.CompactTrees;
 using Voron.Data.Containers;
 using Voron.Data.Lookups;
@@ -19,10 +20,12 @@ using Constants = Voron.Global.Constants;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using Voron.Impl.Paging;
+using static Sparrow.PortableExceptions;
+using static Voron.VoronExceptions;
 
 namespace Voron.Impl
 {
-    public sealed unsafe class Transaction : IDisposable
+    public sealed unsafe class Transaction : IDisposable, IDisposableQueryable
     {
         public LowLevelTransaction LowLevelTransaction
         {
@@ -102,9 +105,8 @@ namespace Voron.Impl
             var header = (TreeRootHeader*)_lowLevelTransaction.RootObjects.DirectRead(treeName);
             if (header != null)
             {
-                if (header->RootObjectType != type)
-                    ThrowInvalidTreeType(treeName, type, header);
-
+                ThrowIf<InvalidOperationException>(header->RootObjectType != type, $"Tried to open {treeName} as a {type}, but it is actually a {header->RootObjectType}");
+                    
                 tree = Tree.Open(_lowLevelTransaction, this, treeName, *header, isIndexTree, newPageAllocator);
 
                 _trees.Add(treeName, tree);
@@ -114,13 +116,6 @@ namespace Voron.Impl
 
             _trees.Add(treeName, null);
             return null;
-        }
-
-        [DoesNotReturn]
-        private static void ThrowInvalidTreeType(Slice treeName, RootObjectType type, TreeRootHeader* header)
-        {
-            throw new InvalidOperationException($"Tried to open {treeName} as a {type}, but it is actually a " +
-                                                header->RootObjectType);
         }
 
         public void Commit()
@@ -135,8 +130,7 @@ namespace Voron.Impl
 
         public Transaction BeginAsyncCommitAndStartNewTransaction(TransactionPersistentContext persistentContext)
         {
-            if (_lowLevelTransaction.Flags != TransactionFlags.ReadWrite)
-                ThrowInvalidAsyncCommitOnRead();
+            ThrowIfReadOnly(_lowLevelTransaction, "Cannot call begin async commit on read tx");
 
             PrepareForCommit();
             
@@ -144,11 +138,6 @@ namespace Voron.Impl
             return new Transaction(tx);
         }
 
-        [DoesNotReturn]
-        private static void ThrowInvalidAsyncCommitOnRead()
-        {
-            throw new InvalidOperationException("Cannot call begin async commit on read tx");
-        }
 
         public void EndAsyncCommit()
         {
@@ -170,11 +159,17 @@ namespace Voron.Impl
                 return LookupFor<TKey>(nameSlice);
             }
         }
+        
         public Lookup<TKey> LookupFor<TKey>(Slice name) where TKey : struct, ILookupKey
         {
             return LowLevelTransaction.RootObjects.LookupFor<TKey>(name);
         }
 
+        public bool TryGetLookupFor<TKey>(Slice name, out Lookup<TKey> lookup) where TKey : struct, ILookupKey
+        {
+            return LowLevelTransaction.RootObjects.TryGetLookupFor(name, out lookup);
+        }
+        
         public long OpenContainer(Slice name)
         {
             var exists = LowLevelTransaction.RootObjects.DirectRead(name);
@@ -210,9 +205,8 @@ namespace Voron.Impl
                 return set;
 
             var clonedName = name.Clone(Allocator);
-            
-            var existing = LowLevelTransaction.RootObjects.Read(name);
-            if (existing == null)
+
+            if (LowLevelTransaction.RootObjects.TryRead(name, out var reader) == false)
             {
                 var state = new PostingListState();
                 PostingList.Create(this.LowLevelTransaction, ref state);
@@ -220,11 +214,13 @@ namespace Voron.Impl
                 {
                     Unsafe.Copy(p, ref state);
                 }
-                existing = LowLevelTransaction.RootObjects.Read(name);
+                
+                bool exists = LowLevelTransaction.RootObjects.TryRead(name, out reader);
+                ThrowIfOnDebug<InvalidOperationException>(exists == false, "This is not possible, since we already added it in DirectAdd.");
             }
  
             set = new PostingList(LowLevelTransaction, clonedName,
-                MemoryMarshal.AsRef<PostingListState>(existing.Reader.AsSpan())
+                MemoryMarshal.AsRef<PostingListState>(reader.AsSpan())
             );
             _postingLists[clonedName] = set;
             return set;
@@ -417,8 +413,7 @@ namespace Voron.Impl
 
         public void DeleteTree(Slice name)
         {
-            if (_lowLevelTransaction.Flags == TransactionFlags.ReadWrite == false)
-                throw new ArgumentException("Cannot create a new newRootTree with a read only transaction");
+            ThrowIfReadOnly(_lowLevelTransaction, "Cannot create a new newRootTree with a read only transaction");
 
             Tree tree = ReadTree(name);
             if (tree == null)
@@ -470,18 +465,16 @@ namespace Voron.Impl
 
         public void RenameTree(Slice fromName, Slice toName)
         {
-            if (_lowLevelTransaction.Flags == TransactionFlags.ReadWrite == false)
-                throw new ArgumentException("Cannot rename a new tree with a read only transaction");
+            ThrowIfReadOnly(_lowLevelTransaction, "Cannot rename a new tree with a read only transaction");
 
             if (SliceComparer.Equals(toName, Constants.RootTreeNameSlice))
-                throw new InvalidOperationException("Cannot create a tree with reserved name: " + toName);
+                Throw<InvalidOperationException>($"Cannot create a tree with reserved name: {toName}");
 
-            if (ReadTree(toName) != null)
-                throw new ArgumentException("Cannot rename a tree with the name of an existing tree: " + toName);
+            var existingTree = ReadTree(toName);
+            ThrowIfNotNull<ArgumentException>(existingTree,$"Cannot rename a tree with the name of an existing tree: {toName}");
 
             Tree fromTree = ReadTree(fromName);
-            if (fromTree == null)
-                throw new ArgumentException("Tree " + fromName + " does not exists");
+            ThrowIfNull<ArgumentException>(fromTree, $"Tree {fromName} does not exists");
 
             _lowLevelTransaction.RootObjects.Delete(fromName);
 
@@ -510,9 +503,7 @@ namespace Voron.Impl
             if (tree != null)
                 return tree;
 
-            if (_lowLevelTransaction.Flags == TransactionFlags.ReadWrite == false)
-                throw new InvalidOperationException("No such tree: '" + name +
-                                                    "' and cannot create trees in read transactions");
+            ThrowIfReadOnly(_lowLevelTransaction, $"No such tree: '{name}' and cannot create trees in read transactions");
 
             tree = Tree.Create(_lowLevelTransaction, this, name, flags, type, isIndexTree, newPageAllocator);
             ref var state = ref tree.State.Modify();
@@ -525,6 +516,8 @@ namespace Voron.Impl
 
             return tree;
         }
+
+        bool IDisposableQueryable.IsDisposed => _lowLevelTransaction == null || _lowLevelTransaction.IsDisposed;
         
         public void Dispose()
         {
@@ -539,6 +532,11 @@ namespace Voron.Impl
             return CompactTreeFor(treeNameSlice);
         }
 
+        public bool TryGetCompactTreeFor(Slice treeName, out CompactTree tree)
+        {
+            return _lowLevelTransaction.RootObjects.TryGetCompactTreeFor(treeName, out tree);
+        }
+        
         public CompactTree CompactTreeFor(Slice treeName)
         {
             return _lowLevelTransaction.RootObjects.CompactTreeFor(treeName);
@@ -643,7 +641,7 @@ namespace Voron.Impl
                 if (indexDef.IsGlobal) // must not delete global indexes
                     continue;
 
-                if (tableTree.Read(indexDef.Name) == null)
+                if (tableTree.TryRead(indexDef.Name, out _) == false)
                     continue;
 
                 var indexTree = table.GetTree(indexDef);
@@ -658,7 +656,7 @@ namespace Voron.Impl
                 if (indexDef.IsGlobal)  // must not delete global indexes
                     continue;
 
-                if (tableTree.Read(indexDef.Name) == null)
+                if (tableTree.TryRead(indexDef.Name, out _) == false)
                     continue;
 
                 var index = table.GetFixedSizeTree(indexDef);
@@ -672,7 +670,7 @@ namespace Voron.Impl
 
             table.ActiveDataSmallSection.FreeRawDataSectionPages();
 
-            if (tableTree.Read(TableSchema.ActiveCandidateSectionSlice) != null)
+            if (tableTree.TryRead(TableSchema.ActiveCandidateSectionSlice, out _))
             {
                 using (var it = table.ActiveCandidateSection.Iterate())
                 {
@@ -688,7 +686,7 @@ namespace Voron.Impl
                 DeleteFixedTree(table.ActiveCandidateSection, isInRoot: false);
             }
 
-            if (tableTree.Read(TableSchema.InactiveSectionSlice) != null)
+            if (tableTree.TryRead(TableSchema.InactiveSectionSlice, out _))
                 DeleteFixedTree(table.InactiveSections, isInRoot: false);
 
             DeleteTree(name);
@@ -726,16 +724,10 @@ namespace Voron.Impl
             return state;
         }
 
-        private readonly struct TableKey
+        private readonly struct TableKey(Slice tableName, bool compressed)
         {
-            private readonly Slice _tableName;
-            private readonly bool _compressed;
-
-            public TableKey(Slice tableName, bool compressed)
-            {
-                _tableName = tableName;
-                _compressed = compressed;
-            }
+            private readonly Slice _tableName = tableName;
+            private readonly bool _compressed = compressed;
 
             private bool Equals(TableKey other) =>
                 SliceComparer.Equals(_tableName, other._tableName) && _compressed == other._compressed;

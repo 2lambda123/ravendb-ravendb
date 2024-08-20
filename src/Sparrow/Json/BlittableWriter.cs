@@ -48,7 +48,15 @@ namespace Sparrow.Json
         {
             get
             {
-                ThrowIfCachedPropertiesWereReset();
+                if (_documentNumber == -1)
+                {
+                    _documentNumber = _context.CachedProperties.DocumentNumber;
+                }
+                else if (_documentNumber != _context.CachedProperties.DocumentNumber)
+                {
+                    throw new InvalidOperationException($"The {_context.CachedProperties} were reset while building the document");
+                }
+                
                 return _context.CachedProperties;
             }
         }
@@ -197,11 +205,7 @@ namespace Sparrow.Json
                 _position += positionSize + propertyIdSize + sizeof(byte);
             }
 
-            return new WriteToken
-            {
-                ValuePos = objectMetadataStart,
-                WrittenToken = objectToken
-            };
+            return new WriteToken(valuePosition: objectMetadataStart, token: objectToken);
         }
 
         public int WriteArrayMetadata(FastList<int> positions, FastList<BlittableJsonToken> types, ref BlittableJsonToken listToken)
@@ -762,18 +766,6 @@ namespace Sparrow.Json
             }
 
             return _compressionBuffer.Address;
-        }
-
-        internal void ThrowIfCachedPropertiesWereReset()
-        {
-            if (_documentNumber == -1)
-            {
-                _documentNumber = _context.CachedProperties.DocumentNumber;
-            }
-            else if (_documentNumber != _context.CachedProperties.DocumentNumber)
-            {
-                throw new InvalidOperationException($"The {_context.CachedProperties} were reset while building the document");
-            }
         }
 
         public void Dispose()

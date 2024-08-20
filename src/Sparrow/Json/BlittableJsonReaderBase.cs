@@ -2,10 +2,11 @@ using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Sparrow.Compression;
+using static Sparrow.DisposableExceptions;
 
 namespace Sparrow.Json
 {
-    public abstract unsafe class BlittableJsonReaderBase
+    public abstract unsafe class BlittableJsonReaderBase : IDisposableQueryable
     {
         protected BlittableJsonReaderObject _parent;
         protected internal byte* _mem;
@@ -14,18 +15,50 @@ namespace Sparrow.Json
         protected BlittableJsonReaderBase(JsonOperationContext context)
         {
             _context = context;
-            AssertContextNotDisposed();
+
+            ThrowIfDisposedOnDebug(this);
         }
 
         public bool BelongsToContext(JsonOperationContext context)
         {
-            AssertContextNotDisposed();
+            ThrowIfDisposedOnDebug(this);
             return context == _context;
         }
+
+        bool IDisposableQueryable.IsDisposed => _context?.IsDisposed ?? false;
+
 
         public bool HasParent => _parent != null;
 
         public bool NoCache { get; set; }
+
+        
+        private static ReadOnlySpan<int> PropertyIdSizeTable => new[]
+        {
+            0, sizeof(byte), // BlittableJsonToken.PropertyIdSizeByte
+            sizeof(short),   // BlittableJsonToken.PropertyIdSizeShort
+            sizeof(int)      // BlittableJsonToken.PropertyIdSizeInt
+        };
+
+        private static ReadOnlySpan<int> PropNamesDataOffsetSizeTable => new[]
+        {
+            0, sizeof(byte), // BlittableJsonToken.OffsetSizeByte
+            sizeof(short),   // BlittableJsonToken.OffsetSizeShort
+            sizeof(int)      // BlittableJsonToken.OffsetSizeInt
+        };
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        protected static int GetPropertyNamesDataOffsetSize(BlittableJsonToken token)
+        {
+            // process part of byte flags that responsible for offset sizes
+            const BlittableJsonToken mask =
+                BlittableJsonToken.OffsetSizeByte |
+                BlittableJsonToken.OffsetSizeShort |
+                BlittableJsonToken.OffsetSizeInt;
+
+            int tokenIndex = (int)(token & mask) / (int)BlittableJsonToken.OffsetSizeByte;
+            return tokenIndex < PropNamesDataOffsetSizeTable.Length ? PropNamesDataOffsetSizeTable[tokenIndex] : 0;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         protected static int ProcessTokenPropertyFlags(BlittableJsonToken currentType)
@@ -36,49 +69,24 @@ namespace Sparrow.Json
                 BlittableJsonToken.PropertyIdSizeShort |
                 BlittableJsonToken.PropertyIdSizeInt;
 
-            // PERF: Switch for this case will create if-then-else anyways. 
-            //       So we order them explicitly based on knowledge.
-            BlittableJsonToken current = currentType & mask;
-            int size; // PERF: We assign to a variable instead to have smaller code for inlining.
-            if (current == BlittableJsonToken.PropertyIdSizeByte)
-                size = sizeof(byte); 
-            else if (current == BlittableJsonToken.PropertyIdSizeShort)
-                size = sizeof(short);
-            else if (current == BlittableJsonToken.PropertyIdSizeInt)
-                size = sizeof(int);
-            else
-                size = ThrowInvalidOffsetSize(currentType);
-                
-            return size;                        
+            int tokenIndex = (int)(currentType & mask) / (int)BlittableJsonToken.PropertyIdSizeByte;
+            if (tokenIndex < PropertyIdSizeTable.Length)
+            {
+                int offsetSize = PropertyIdSizeTable[tokenIndex];
+                if (offsetSize > 0)
+                    return offsetSize;
+            }
+
+            throw new ArgumentException($"Illegal offset size {currentType}");
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         protected static int ProcessTokenOffsetFlags(BlittableJsonToken currentType)
         {
-            // process part of byte flags that responsible for offset sizes
-            const BlittableJsonToken mask =
-                BlittableJsonToken.OffsetSizeByte |
-                BlittableJsonToken.OffsetSizeShort |
-                BlittableJsonToken.OffsetSizeInt;
+            var result = GetPropertyNamesDataOffsetSize(currentType);
+            if (result > 0)
+                return result;
 
-            // PERF: Switch for this case will create if-then-else anyways. 
-            //       So we order them explicitly based on knowledge.
-            BlittableJsonToken current = currentType & mask;
-            int size; // PERF: We assign to a variable instead to have smaller code for inlining.
-            if (current == BlittableJsonToken.OffsetSizeByte)
-                size = sizeof(byte);
-            else if (current == BlittableJsonToken.OffsetSizeShort)
-                size = sizeof(short);
-            else if (current == BlittableJsonToken.OffsetSizeInt)
-                size = sizeof(int);
-            else
-                size = ThrowInvalidOffsetSize(currentType);
-
-            return size;
-        }
-
-        private static int ThrowInvalidOffsetSize(BlittableJsonToken currentType)
-        {
             throw new ArgumentException($"Illegal offset size {currentType}");
         }
 
@@ -98,12 +106,6 @@ namespace Sparrow.Json
             if (token is >= BlittableJsonToken.StartObject and <= BlittableJsonToken.RawBlob)
                 return currentType & TypesMask;
 
-            ThrowInvalidType(currentType);
-            return default;// will never happen
-        }
-
-        private static void ThrowInvalidType(BlittableJsonToken currentType)
-        {
             throw new ArgumentException($"Illegal type {currentType}");
         }
 
@@ -112,33 +114,23 @@ namespace Sparrow.Json
         {
             int returnValue = *value;
             if (sizeOfValue == sizeof(byte))
-                goto Successful;
+                return returnValue;
 
             returnValue |= *(value + 1) << 8;
             if (sizeOfValue == sizeof(short))
-                goto Successful;
+                return returnValue;
 
             returnValue |= *(short*)(value + 2) << 16;
             if (sizeOfValue == sizeof(int))
-                goto Successful;
+                return returnValue;
 
-            goto Error;
-            
-            Successful:
-            return returnValue;
-
-            Error:
-            return ThrowInvalidSizeForNumber(sizeOfValue);
-        }
-
-        private static int ThrowInvalidSizeForNumber(long sizeOfValue)
-        {
             throw new ArgumentException($"Unsupported size {sizeOfValue}");
         }
 
         public BlittableJsonReaderObject ReadNestedObject(int pos)
         {
-            AssertContextNotDisposed();
+            ThrowIfDisposedOnDebug(this);
+            
             var size = VariableSizeEncoding.Read<int>(_mem + pos, out var offset);
             return new BlittableJsonReaderObject(_mem + pos + offset, size, _context)
             {
@@ -149,7 +141,8 @@ namespace Sparrow.Json
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public LazyStringValue ReadStringLazily(int pos)
         {
-            AssertContextNotDisposed();
+            ThrowIfDisposedOnDebug(this);
+            
             var size = VariableSizeEncoding.Read<int>(_mem + pos, out var offset);
 
             return _context.AllocateStringValue(null, _mem + pos + offset, size);
@@ -158,7 +151,8 @@ namespace Sparrow.Json
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public LazyCompressedStringValue ReadCompressStringLazily(int pos)
         {
-            AssertContextNotDisposed();
+            ThrowIfDisposedOnDebug(this);
+            
             var uncompressedSize = VariableSizeEncoding.Read<int>(_mem + pos, out var offset);
             pos += offset;
             var compressedSize = VariableSizeEncoding.Read<int>(_mem + pos, out offset);
@@ -231,24 +225,6 @@ namespace Sparrow.Json
         protected long ReadVariableSizeLong(int pos)
         {
             return ZigZagEncoding.Decode<long>(_mem, out _, pos: pos);
-        }
-
-        [Conditional("DEBUG")]
-        protected void AssertContextNotDisposed()
-        {
-            if (_context?.Disposed ?? false)
-            {
-                throw new ObjectDisposedException("blittable's context has been disposed, blittable should not be used now in that case!");
-            }
-        }
-
-        [Conditional("DEBUG")]
-        protected void AssertContextNotDisposed(JsonOperationContext context)
-        {
-            if (context?.Disposed ?? false)
-            {
-                throw new ObjectDisposedException("blittable's context has been disposed, blittable should not be used now in that case!");
-            }
         }
     }
 }

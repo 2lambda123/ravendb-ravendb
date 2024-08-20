@@ -13,15 +13,20 @@ using Voron.Impl;
 using Voron.Impl.Paging;
 using Sparrow.Collections;
 using Sparrow.Server;
-using Voron.Data.CompactTrees;
 using Voron.Data.Lookups;
 using Constants = Voron.Global.Constants;
 using System.Diagnostics.CodeAnalysis;
-using Sparrow.Json;
+
+using static Sparrow.DisposableExceptions;
+using static Sparrow.PortableExceptions;
+using static Voron.VoronExceptions;
+
+using CompactTree = Voron.Data.CompactTrees.CompactTree;
+using FixedSizeTree = Voron.Data.Fixed.FixedSizeTree;
 
 namespace Voron.Data.BTrees
 {
-    public unsafe partial class Tree
+    public unsafe partial class Tree 
     {
         private int _directAddUsage;
 
@@ -32,7 +37,6 @@ namespace Voron.Data.BTrees
         private RecentlyFoundTreePages _recentlyFoundPages;
 
         private Dictionary<Slice, FixedSizeTree> _fixedSizeTrees;
-        private Dictionary<Slice, FixedSizeTree<double>> _fixedSizeTreesForDouble;
 
         private SliceSmallSet<IPrepareForCommit> _prepareLocator;
 
@@ -41,7 +45,7 @@ namespace Voron.Data.BTrees
 
         public Slice Name { get; private set; }
 
-        public TreeMutableState State => _state;
+        public TreeMutableState State { get; }
 
         private readonly LowLevelTransaction _llt;
         private readonly Transaction _tx;
@@ -64,8 +68,7 @@ namespace Voron.Data.BTrees
             }
 
             _recentlyFoundPages = FoundPagesPool.Allocate();
-
-            _state = new TreeMutableState(llt, in header);
+            State = new TreeMutableState(llt, in header);
 
             llt.RegisterDisposable(new TreeDisposable(this));
         }
@@ -79,27 +82,23 @@ namespace Voron.Data.BTrees
 
             if (newPageAllocator != null)
             {
-                Debug.Assert(isIndexTree, "If newPageAllocator is set, we must be in a isIndexTree = true");
+                ThrowIfNullOnDebug(isIndexTree, "If newPageAllocator is set, we must be in a isIndexTree = true");
                 SetNewPageAllocator(newPageAllocator);
             }
 
             _recentlyFoundPages = FoundPagesPool.Allocate();
-            _state = new TreeMutableState(llt);
+            State = new TreeMutableState(llt);
 
             llt.RegisterDisposable(new TreeDisposable(this));
         }
 
-        public Tree(LowLevelTransaction llt, Transaction tx, Slice name, TreeMutableState state)
+        private Tree(LowLevelTransaction llt, Slice name, TreeMutableState state)
         {
             _llt = llt;
-            _tx = tx;
             Name = name;
 
             _recentlyFoundPages = FoundPagesPool.Allocate();
-
-
-            _state = new TreeMutableState(llt, state);
-            _state = state;
+            State = state;
 
             llt.RegisterDisposable(new TreeDisposable(this));
         }
@@ -122,6 +121,11 @@ namespace Voron.Data.BTrees
 
         public bool HasNewPageAllocator { get; private set; }
 
+        public static Tree GetRoot(LowLevelTransaction llt, TreeMutableState parentState)
+        {
+            return new Tree(llt, Constants.RootTreeNameSlice, parentState);
+        }
+        
         public static Tree Open(LowLevelTransaction llt, Transaction tx, Slice name, in TreeRootHeader header, bool isIndexTree = false, NewPageAllocator newPageAllocator = null)
         {
             var tree = new Tree(llt, tx, header, name, isIndexTree, newPageAllocator);
@@ -135,11 +139,9 @@ namespace Voron.Data.BTrees
         public static Tree Create(LowLevelTransaction llt, Transaction tx, Slice name, TreeFlags flags = TreeFlags.None, RootObjectType type = RootObjectType.VariableSizeTree,
             bool isIndexTree = false, NewPageAllocator newPageAllocator = null)
         {
-            if (type != RootObjectType.VariableSizeTree && type != RootObjectType.Table)
-                ThrowInvalidTreeCreateType();
-
-            if (llt.Flags != TransactionFlags.ReadWrite)
-                ThrowCannotCreateTreeInReadTx();
+            ThrowIfReadOnly(llt);
+            ThrowIf<ArgumentException>(type != RootObjectType.VariableSizeTree && type != RootObjectType.Table,
+                $"Only valid types are {nameof(RootObjectType.VariableSizeTree)} or {nameof(RootObjectType.Table)}.");
 
             var newPage = newPageAllocator?.AllocateSinglePage(0) ?? llt.AllocatePage(1);
 
@@ -160,19 +162,7 @@ namespace Voron.Data.BTrees
             return tree;
         }
 
-        [DoesNotReturn]
-        private static void ThrowCannotCreateTreeInReadTx()
-        {
-            throw new ArgumentException("Cannot create a tree in a read only transaction");
-        }
-
-        [DoesNotReturn]
-        private static void ThrowInvalidTreeCreateType()
-        {
-            throw new ArgumentException($"Only valid types are {nameof(RootObjectType.VariableSizeTree)} or {nameof(RootObjectType.Table)}.");
-        }
-
-        internal void RecordNewPage(TreePage p, int num)
+        private void RecordNewPage(TreePage p, int num)
         {
             ref var header = ref State.Modify();
 
@@ -192,7 +182,7 @@ namespace Voron.Data.BTrees
             }
         }
 
-        internal void RecordFreedPage(TreePage p, int num)
+        private void RecordFreedPage(TreePage p, int num)
         {
             ref var header = ref State.Modify();
 
@@ -225,9 +215,8 @@ namespace Voron.Data.BTrees
             
             long currentValue = 0;
 
-            var read = Read(key);
-            if (read != null)
-                currentValue = *(long*)read.Reader.Base;
+            if (TryRead(key, out var reader))
+                currentValue = *(long*)reader.Base;
 
             var value = currentValue + delta;
             using (DirectAdd(key, sizeof(long), out byte* ptr))
@@ -241,11 +230,11 @@ namespace Voron.Data.BTrees
         /// </summary>
         public long? ReadInt64(Slice key)
         {
-            var read = Read(key);
-            if (read == null)
+            if (TryRead(key, out var reader) == false)
                 return null;
-            Debug.Assert(read.Reader.Length == sizeof(long));
-            return *(long*)read.Reader.Base;
+
+            Debug.Assert(reader.Length == sizeof(long));
+            return *(long*)reader.Base;
         }
 
         /// <summary>
@@ -253,11 +242,11 @@ namespace Voron.Data.BTrees
         /// </summary>
         public int? ReadInt32(Slice key)
         {
-            var read = Read(key);
-            if (read == null) 
+            if (TryRead(key, out var reader) == false)
                 return null;
-            Debug.Assert(read.Reader.Length == sizeof(int));
-            return *(int*)read.Reader.Base;
+
+            Debug.Assert(reader.Length == sizeof(int));
+            return *(int*)reader.Base;
 
         }
         
@@ -267,11 +256,11 @@ namespace Voron.Data.BTrees
         public T? ReadStructure<T>(Slice key)
             where T : unmanaged
         {
-            var read = Read(key);
-            if (read == null) 
+            if (TryRead(key, out var reader) == false)
                 return null;
-            Debug.Assert(read.Reader.Length == sizeof(T));
-            return *(T*)read.Reader.Base;
+
+            Debug.Assert(reader.Length == sizeof(T));
+            return *(T*)reader.Base;
 
         }
 
@@ -297,7 +286,8 @@ namespace Voron.Data.BTrees
 
         public void Add(Slice key, Stream value)
         {
-            ValidateValueLength(value);
+            ThrowIfNull(value);
+            ThrowIf<ArgumentException>(value.Length > int.MaxValue, "Cannot add a value that is over 2GB in size");
 
             var length = (int)value.Length;
 
@@ -307,44 +297,20 @@ namespace Voron.Data.BTrees
             }
         }
 
-        private static void ValidateValueLength(Stream value)
-        {
-            if (value == null)
-                ThrowNullReferenceException();
-            Debug.Assert(value != null);
-            if (value.Length > int.MaxValue)
-                ThrowValueTooLarge();
-        }
-
-        [DoesNotReturn]
-        private static void ThrowValueTooLarge()
-        {
-            throw new ArgumentException("Cannot add a value that is over 2GB in size");
-        }
-
-        [DoesNotReturn]
-        private static void ThrowNullReferenceException()
-        {
-            throw new ArgumentNullException();
-        }
-
         public void Add(Slice key, ReadOnlySpan<byte> value)
         {
-            if (value == null)
-                ThrowNullReferenceException();
-
-            Debug.Assert(value != null);
-
             using (DirectAdd(key, value.Length, out byte* ptr))
                 value.CopyTo(new Span<byte>(ptr, value.Length));
         }
 
         public void Add(Slice key, Slice value)
         {
-            Debug.Assert((State.Header.Flags & TreeFlags.MultiValue) == TreeFlags.None,"(State.Flags & TreeFlags.MultiValue) == TreeFlags.None");
+            VoronExceptions.ThrowIfNull(value);
             
+            Debug.Assert((State.Header.Flags & TreeFlags.MultiValue) == TreeFlags.None,"(State.Flags & TreeFlags.MultiValue) == TreeFlags.None");
+
             if (!value.HasValue)
-                ThrowNullReferenceException();
+                throw new NullReferenceException();
 
             using (DirectAdd(key, value.Size, out byte* ptr))
                 value.CopyTo(ptr);
@@ -364,10 +330,8 @@ namespace Voron.Data.BTrees
 
         public DirectAddScope DirectAdd(Slice key, int len, TreeNodeFlags nodeType, out byte* ptr)
         {
-            AssertNotDisposed();
-
-            if (_llt.Flags is TransactionFlags.Read)
-                ThrowCannotAddInReadTx();
+            ThrowIfDisposedOnDebug(_llt);
+            ThrowIfReadOnly(_llt);
 
             if (key.Size > Constants.Tree.MaxKeySize)
                 ThrowInvalidKeySize(key);
@@ -420,7 +384,9 @@ namespace Voron.Data.BTrees
             }
             
             nodeType &= ~TreeNodeFlags.NewOnly;
-            Debug.Assert(nodeType == TreeNodeFlags.Data || nodeType == TreeNodeFlags.MultiValuePageRef);
+            
+            ThrowIfOnDebug<InvalidOperationException>(nodeType != TreeNodeFlags.Data && nodeType != TreeNodeFlags.MultiValuePageRef,
+                $"Node should be either {nameof(TreeNodeFlags.Data)} or {nameof(TreeNodeFlags.MultiValuePageRef)}");
 
             var lastSearchPosition = page.LastSearchPosition; // searching for overflow pages might change this
             byte* overFlowPos = null;
@@ -508,7 +474,7 @@ namespace Voron.Data.BTrees
             private void ThrowScopeAlreadyOpen()
             {
                 var message = $"Write operation already requested on a tree name: {_parent}. " +
-                              $"{nameof(Tree.DirectAdd)} method cannot be called recursively while the scope is already opened.";
+                              $"{nameof(DirectAdd)} method cannot be called recursively while the scope is already opened.";
 
 
                 throw new InvalidOperationException(message);
@@ -516,6 +482,7 @@ namespace Voron.Data.BTrees
 
         }
 
+        [DoesNotReturn]
         private static void ThrowUnknownNodeTypeAddOperation(TreeNodeFlags nodeType)
         {
             throw new NotSupportedException("Unknown node type for direct add operation: " + nodeType);
@@ -529,14 +496,9 @@ namespace Voron.Data.BTrees
                 nameof(key));
         }
 
-        private void ThrowCannotAddInReadTx()
-        {
-            throw new ArgumentException("Cannot add a value in a read only transaction on " + Name + " in " + _llt.Flags);
-        }
-
         public TreePage ModifyPage(TreePage page)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             if (page.Dirty)
                 return page;
@@ -550,7 +512,7 @@ namespace Voron.Data.BTrees
 
         public TreePage ModifyPage(long pageNumber)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             var newPage = GetWriteableTreePage(pageNumber);
             newPage.Dirty = true;
@@ -607,8 +569,6 @@ namespace Voron.Data.BTrees
 
         public void ValidateTree_Forced(long rootPageNumber)
         {
-
-
             var pages = new HashSet<long>();
             var stack = new Stack<TreePage>();
             var root = GetReadOnlyTreePage(rootPageNumber);
@@ -711,9 +671,7 @@ namespace Voron.Data.BTrees
 
         internal TreePage FindPageFor(Slice key, out TreeNodeHeader* node, out TreeCursorConstructor cursor, bool allowCompressed = false)
         {
-            TreePage p;
-
-            if (TryUseRecentTransactionPage(key, out cursor, out p, out node))
+            if (TryUseRecentTransactionPage(key, out cursor, out TreePage p, out node))
             {
                 if (allowCompressed == false && p.IsCompressed)
                     ThrowOnCompressedPage(p);
@@ -939,14 +897,12 @@ namespace Voron.Data.BTrees
 
         private bool TryUseRecentTransactionPage(Slice key, out TreePage page, out TreeNodeHeader* node)
         {
-            node = null;
-            page = null;
-
-            if (_recentlyFoundPages == null)
+            if (_recentlyFoundPages == null || _recentlyFoundPages.TryFind(key, out var foundPage) == false)
+            {
+                page = null;
+                node = null;
                 return false;
-
-            if (_recentlyFoundPages.TryFind(key, out var foundPage) == false)
-                return false;
+            }
 
             if (foundPage.Page != null)
             {
@@ -1075,10 +1031,8 @@ namespace Voron.Data.BTrees
 
         public void Delete(Slice key)
         {
-            AssertNotDisposed();
-
-            if (_llt.Flags == (TransactionFlags.ReadWrite) == false)
-                throw new ArgumentException("Cannot delete a value in a read only transaction");
+            ThrowIfDisposedOnDebug(_llt);
+            ThrowIfReadOnly(_llt, "Cannot delete a value in a read only transaction");
 
             var page = FindPageFor(key, node: out TreeNodeHeader* _, cursor: out var cursorConstructor, allowCompressed: true);
             if (page.IsCompressed)
@@ -1112,14 +1066,14 @@ namespace Voron.Data.BTrees
 
         public TreeIterator Iterate(bool prefetch)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             return new TreeIterator(this, _llt, prefetch);
         }
 
         public ReadResult Read(Slice key)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             var p = FindPageFor(key, out TreeNodeHeader* node);
 
@@ -1129,9 +1083,25 @@ namespace Voron.Data.BTrees
             return new ReadResult(GetValueReaderFromHeader(node));
         }
 
+        public bool TryRead(Slice key, out ValueReader reader)
+        {
+            ThrowIfDisposedOnDebug(_llt);
+
+            var p = FindPageFor(key, out TreeNodeHeader* node);
+
+            if (p.LastMatch != 0)
+            {
+                Unsafe.SkipInit(out reader);
+                return false;
+            }
+
+            reader = GetValueReaderFromHeader(node);
+            return true;
+        }
+
         public bool Exists(Slice key)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             var p = FindPageFor(key, out _);
             return p.LastMatch == 0;
@@ -1139,7 +1109,7 @@ namespace Voron.Data.BTrees
 
         public int GetDataSize(Slice key)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             var p = FindPageFor(key, out TreeNodeHeader* node);
 
@@ -1160,7 +1130,7 @@ namespace Voron.Data.BTrees
 
         public int GetDataSize(TreeNodeHeader* node)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             if (node->Flags == (TreeNodeFlags.PageRef))
             {
@@ -1172,7 +1142,7 @@ namespace Voron.Data.BTrees
 
         public void RemoveEmptyDecompressedPage(DecompressedLeafPage emptyPage)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             using (emptyPage.Original.GetNodeKey(_llt, 0, out var key))
             {
@@ -1194,7 +1164,7 @@ namespace Voron.Data.BTrees
 
         public long GetParentPageOf(TreePage page)
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             Debug.Assert(page.IsCompressed == false);
 
@@ -1269,7 +1239,7 @@ namespace Voron.Data.BTrees
 
         public List<long> AllPages()
         {
-            AssertNotDisposed();
+            ThrowIfDisposedOnDebug(_llt);
 
             var results = new List<long>();
             var stack = new Stack<TreePage>();
@@ -1361,13 +1331,6 @@ namespace Voron.Data.BTrees
                 ct.PrepareForCommit();
         }
 
-        [Conditional("DEBUG")]
-        internal void AssertNotDisposed()
-        {
-            if (_llt.IsDisposed)
-                throw new InvalidOperationException("Cannot call this operation on a disposed instance.");
-        }
-
         private bool TryOverwriteOverflowPages(TreeNodeHeader* updatedNode, int len, out byte* pos)
         {
             if (updatedNode->Flags == TreeNodeFlags.PageRef)
@@ -1417,10 +1380,10 @@ namespace Voron.Data.BTrees
             using var _ = Slice.From(_llt.Allocator, key, ByteStringType.Immutable, out var keySlice);
             return CompactTreeFor(keySlice);
         }
-        
+
         // RavenDB-21678: If you're keeping a reference to CompactTree, it may happen that you can actually override the prepareLocator and 
         // have more than one object of the same tree in memory but with different states. It's dangerous to mix usage since the object retains states.
-        public CompactTree CompactTreeFor(Slice key)
+        public bool TryGetCompactTreeFor(Slice key, out CompactTree tree)
         {
             // RavenDB-21678: Indexes with dynamic fields can generate a lot of fields, which can lead to overflow in the locator.
             // We've observed indexes with more than ~150 fields, and since performance is crucial, we increased it by one order of magnitude.
@@ -1432,22 +1395,39 @@ namespace Voron.Data.BTrees
 
             if (_prepareLocator.TryGetValue(key, out var prep) == false)
             {
-                var compactTree = CompactTree.InternalCreate(this, key);
-                if (compactTree == null) // missing value on read transaction
-                    return null;
+                tree = CompactTree.InternalCreate(this, key);
+                if (tree == null) // missing value on read transaction
+                    return false;
 
                 var keyClone = key.Clone(_llt.Allocator);
-                _prepareLocator.Add(keyClone, compactTree);
-                prep = compactTree;
+                _prepareLocator.Add(keyClone, tree);
+                prep = tree;
             }
 
             Debug.Assert(State.Header.Flags.HasFlag(TreeFlags.CompactTrees));
 
-            return (CompactTree)prep;
+            tree = (CompactTree)prep;
+            return true;
         }
 
+        public CompactTree CompactTreeFor(Slice key)
+        {
+            if (TryGetCompactTreeFor(key, out var tree))
+                return tree;
+
+            throw new InvalidOperationException($"{nameof(CompactTree)} with key '{key}' does not exist.");
+        }
 
         public Lookup<TKey> LookupFor<TKey>(Slice key)
+            where TKey : struct, ILookupKey
+        {
+            if (TryGetLookupFor<TKey>(key, out var lookup))
+                return lookup;
+
+            throw new InvalidOperationException($"{nameof(Lookup<TKey>)} with key '{key}' does not exist.");
+        }
+
+        public bool TryGetLookupFor<TKey>(Slice key, out Lookup<TKey> lookup)
             where TKey : struct, ILookupKey
         {
             if (_prepareLocator == null)
@@ -1458,10 +1438,10 @@ namespace Voron.Data.BTrees
 
             if (_prepareLocator.TryGetValue(key, out var prep) == false)
             {
-                var lookup = Lookup<TKey>.InternalCreate(this, key);
-                if (lookup == null) // missing value on read transaction
-                    return null;
-
+                lookup = Lookup<TKey>.InternalCreate(this, key);
+                if (lookup == null)
+                    return false;
+                
                 var keyClone = key.Clone(_llt.Allocator);
                 _prepareLocator.Add(keyClone, lookup);
                 prep = lookup;
@@ -1469,7 +1449,8 @@ namespace Voron.Data.BTrees
 
             Debug.Assert(State.Header.Flags.HasFlag(TreeFlags.Lookups));
 
-            return (Lookup<TKey>)prep;
+            lookup = (Lookup<TKey>)prep;
+            return true;
         }
 
         public FixedSizeTree FixedTreeFor(Slice key, byte valSize = 0)
@@ -1487,31 +1468,16 @@ namespace Voron.Data.BTrees
                 }
 
                 _fixedSizeTrees[fixedTree.Name] = fixedTree;
+
+                _llt.RegisterDisposable(fixedTree);
             }
 
             // RavenDB-22261: It may happen that the FixedSizeTree requested does not exist, and if it does not
             // it would still return an instance. This is a workaround because the check in debug is correct.
             // https://issues.hibernatingrhinos.com/issue/RavenDB-22261/Inconsistency-in-Tree-external-API
-            Debug.Assert(fixedTree.NumberOfEntries == 0 || State.Header.Flags.HasFlag(TreeFlags.FixedSizeTrees));
-
-            return fixedTree;
-        }
-
-        public FixedSizeTree<double> FixedTreeForDouble(Slice key, byte valSize = 0)
-        {
-            _fixedSizeTreesForDouble ??= new Dictionary<Slice, FixedSizeTree<double>>(SliceComparer.Instance);
-
-            if (_fixedSizeTreesForDouble.TryGetValue(key, out var fixedTree) == false)
-            {
-                fixedTree = new FixedSizeTree<double>(_llt, this, key, valSize);
-                _fixedSizeTreesForDouble[fixedTree.Name] = fixedTree;
-            }
-
-            // RavenDB-22261: It may happen that the FixedSizeTree requested does not exist, and if it does not
-            // it would still return an instance. This is a workaround because the check in debug is correct.
-            // https://issues.hibernatingrhinos.com/issue/RavenDB-22261/Inconsistency-in-Tree-external-API
-            Debug.Assert(fixedTree.NumberOfEntries == 0 || State.Header.Flags.HasFlag(TreeFlags.FixedSizeTrees));
-
+            Debug.Assert(fixedTree.NumberOfEntries == 0 || 
+                         fixedTree.Type == RootObjectType.EmbeddedFixedSizeTree || 
+                         State.Header.Flags.HasFlag(TreeFlags.FixedSizeTrees));
 
             return fixedTree;
         }
@@ -1539,7 +1505,6 @@ namespace Voron.Data.BTrees
                 }
             }
             _fixedSizeTrees.Remove(key);
-            _fixedSizeTreesForDouble?.Remove(key);
             Delete(key);
 
             return numberOfEntries;

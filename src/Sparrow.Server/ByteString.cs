@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -14,7 +14,12 @@ using Sparrow.LowMemory;
 using Sparrow.Platform;
 using Sparrow.Threading;
 using Sparrow.Utils;
+
 using NativeMemory = Sparrow.Utils.NativeMemory;
+
+using static Sparrow.DisposableExceptions;
+using static Sparrow.PortableExceptions;
+
 
 namespace Sparrow.Server
 {
@@ -121,12 +126,12 @@ namespace Sparrow.Server
 #if DEBUG
         public int Generation;
 #endif
-        public ByteStringType Flags
+        public readonly ByteStringType Flags
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                Debug.Assert(HasValue, "ByteString.HasValue");
+                ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
                 EnsureIsNotBadPointer();
 
                 return _pointer->Flags;
@@ -138,7 +143,7 @@ namespace Sparrow.Server
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                Debug.Assert(HasValue, "ByteString.HasValue");
+                ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
                 EnsureIsNotBadPointer();
 
                 return _pointer->Ptr;
@@ -154,33 +159,27 @@ namespace Sparrow.Server
                 return;
             }
 
-            ThrowFlagsWithReservedBits();
+            Throw<ArgumentException>("The flags passed contains reserved bits.");
         }
 
-        [DoesNotReturn]
-        private void ThrowFlagsWithReservedBits()
-        {
-            throw new ArgumentException("The flags passed contains reserved bits.");
-        }
-
-        public bool IsMutable
+        public readonly bool IsMutable
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                Debug.Assert(HasValue, "ByteString.HasValue");
+                ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
                 EnsureIsNotBadPointer();
 
                 return (_pointer->Flags & ByteStringType.Mutable) != 0;
             }
         }
 
-        public bool IsExternal
+        public readonly bool IsExternal
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                Debug.Assert(HasValue, "ByteString.HasValue");
+                ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
                 EnsureIsNotBadPointer();
 
                 return (_pointer->Flags & ByteStringType.External) != 0;
@@ -201,7 +200,7 @@ namespace Sparrow.Server
             }
         }
 
-        public int Size
+        public readonly int Size
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
@@ -224,7 +223,7 @@ namespace Sparrow.Server
             }
         }
 
-        public byte this[int index]
+        public readonly byte this[int index]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
@@ -238,10 +237,8 @@ namespace Sparrow.Server
 
         public void CopyTo(int from, byte* dest, int offset, int count)
         {
-            Debug.Assert(HasValue, "ByteString.HasValue");
-
-            if (from + count > _pointer->Length)
-                throw new ArgumentOutOfRangeException(nameof(from), "Cannot copy data after the end of the slice");
+            ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
+            ThrowIf<ArgumentOutOfRangeException>(from + count > _pointer->Length, "Cannot copy data after the end of the slice");
 
             EnsureIsNotBadPointer();
             Memory.Copy(dest + offset, _pointer->Ptr + from, count);
@@ -254,7 +251,7 @@ namespace Sparrow.Server
 
         public void CopyTo(byte* dest)
         {
-            Debug.Assert(HasValue, "ByteString.HasValue");
+            ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
 
             EnsureIsNotBadPointer();
             Memory.Copy(dest, _pointer->Ptr, _pointer->Length);
@@ -262,7 +259,7 @@ namespace Sparrow.Server
 
         public void CopyTo(byte[] dest)
         {
-            Debug.Assert(HasValue, "ByteString.HasValue");
+            ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
 
             EnsureIsNotBadPointer();
             new Span<byte>(_pointer->Ptr, _pointer->Length).CopyTo(dest);
@@ -301,16 +298,13 @@ namespace Sparrow.Server
         
         public void CopyTo(int from, byte[] dest, int offset, int count)
         {
-            Debug.Assert(HasValue, "ByteString.HasValue");
-
-            if (from + count > _pointer->Length)
-                throw new ArgumentOutOfRangeException(nameof(from), "Cannot copy data after the end of the slice");
-            if (offset + count > dest.Length)
-                throw new ArgumentOutOfRangeException(nameof(from), "Cannot copy data after the end of the buffer");
-
+            ThrowIfOnDebug<InvalidOperationException>(HasValue == false, $"{nameof(HasValue)} is false.");
             EnsureIsNotBadPointer();
+            
+            ThrowIf<ArgumentOutOfRangeException>(from + count > _pointer->Length, "Cannot copy data after the end of the slice");
+            ThrowIf<ArgumentOutOfRangeException>(offset + count > dest.Length, "Cannot copy data after the end of the buffer");
 
-            new Span<byte>(_pointer->Ptr + from, count)
+            new ReadOnlySpan<byte>(_pointer->Ptr + from, count)
                 .CopyTo(dest.AsSpan(offset, count));
         }
 
@@ -360,17 +354,12 @@ namespace Sparrow.Server
             EnsureIsNotBadPointer();
 
             if (_pointer->Size < newSize || newSize < 0)
-                ThrowInvalidSize();
-
+            {
+                Throw<ArgumentOutOfRangeException>( $"{nameof(newSize)} must be within the existing string limit.");
+            }
+            
             _pointer->Length = newSize;
         }
-
-        [DoesNotReturn]
-        private static void ThrowInvalidSize()
-        {
-            throw new ArgumentOutOfRangeException("newSize", "must be within the existing string limits");
-        }
-
 
         public string ToString(Encoding encoding)
         {
@@ -512,7 +501,7 @@ namespace Sparrow.Server
 
     public interface IByteStringAllocator
     {
-        UnmanagedGlobalSegment Allocate(int size, Action allocationFailure);
+        UnmanagedGlobalSegment Allocate(int size);
         void Free(UnmanagedGlobalSegment memory);
     }
 
@@ -521,17 +510,9 @@ namespace Sparrow.Server
     /// </summary>
     public struct ByteStringDirectAllocator : IByteStringAllocator
     {
-        public UnmanagedGlobalSegment Allocate(int size, Action allocationFailure)
+        public UnmanagedGlobalSegment Allocate(int size)
         {
-            try
-            {
-                return new UnmanagedGlobalSegment(size);
-            }
-            catch
-            {
-                allocationFailure?.Invoke();
-                throw;
-            }
+            return new UnmanagedGlobalSegment(size);
         }
 
         public void Free(UnmanagedGlobalSegment memory)
@@ -579,7 +560,7 @@ namespace Sparrow.Server
         [ThreadStatic]
         private static int _minSize;
 
-        public UnmanagedGlobalSegment Allocate(int size, Action allocationFailure)
+        public UnmanagedGlobalSegment Allocate(int size)
         {
             if (_minSize < size)
                 _minSize = size;
@@ -612,22 +593,12 @@ namespace Sparrow.Server
                 segment.Dispose();
             }
 
-            // have to allocate it directly
-            try
-            {
-                return new UnmanagedGlobalSegment(size);
-            }
-            catch
-            {
-                allocationFailure?.Invoke();
-                throw;
-            }
+            return new UnmanagedGlobalSegment(size);
         }
 
         public unsafe void Free(UnmanagedGlobalSegment memory)
         {
-            if (memory.Segment == null)
-                ThrowInvalidMemorySegment();
+            ThrowIfNull<InvalidOperationException>(memory.Segment, "Attempt to return a memory segment that has already been disposed");
 
             if (_minSize > memory.Size)
             {
@@ -649,12 +620,6 @@ namespace Sparrow.Server
             }
         }
 
-        [DoesNotReturn]
-        private static void ThrowInvalidMemorySegment()
-        {
-            throw new InvalidOperationException("Attempt to return a memory segment that has already been disposed");
-        }
-
         public static void CleanForCurrentThread()
         {
             if (SegmentsPool.IsValueCreated == false)
@@ -671,7 +636,8 @@ namespace Sparrow.Server
         }
     }
 
-    public sealed class ByteStringContext : ByteStringContext<ByteStringMemoryCache>
+    public sealed class ByteStringContext(SharedMultipleUseFlag lowMemoryFlag, int allocationBlockSize = ByteStringContext.DefaultAllocationBlockSizeInBytes)
+        : ByteStringContext<ByteStringMemoryCache>(lowMemoryFlag, allocationBlockSize)
     {
         internal static readonly int ExternalAlignedSize;
 
@@ -687,12 +653,15 @@ namespace Sparrow.Server
 
             Debug.Assert((PlatformDetails.Is32Bits ? 24 : 32) == ExternalAlignedSize, "(PlatformDetails.Is32Bits ? 24 : 32) == ExternalAlignedSize");
         }
-
-        public ByteStringContext(SharedMultipleUseFlag lowMemoryFlag, int allocationBlockSize = DefaultAllocationBlockSizeInBytes) : base(lowMemoryFlag, allocationBlockSize)
-        { }
     }
 
-    public unsafe class ByteStringContext<TAllocator> : IDisposable 
+    public interface INotifyAllocationFailure
+    {
+        void OnAllocationFailure<TAllocator>(ByteStringContext<TAllocator> context) 
+            where TAllocator : struct, IByteStringAllocator;
+    }
+    
+    public unsafe class ByteStringContext<TAllocator> : IDisposable, IDisposableQueryable
         where TAllocator : struct, IByteStringAllocator
     {
         private static readonly long DefragmentationSegmentsThresholdInBytes = (PlatformDetails.Is32Bits ? 32 : 128) * Sparrow.Global.Constants.Size.Megabyte;
@@ -701,7 +670,12 @@ namespace Sparrow.Server
 
         public static TAllocator Allocator;
 
-        public event Action AllocationFailed;
+        private INotifyAllocationFailure _allocationFailureListener;
+        
+        // PERF: The idea is that we will avoid as much as possible to allocate to deal with this as
+        // the most common case is the single listener. But when that happen, we will add the rest
+        // as events and allocate. 
+        private event Action AllocationFailedMultiListener;
 
         private sealed class SegmentInformation
         {
@@ -816,14 +790,14 @@ namespace Sparrow.Server
 
         public void Reset()
         {
-            if (_disposed)
-            {
-                ThrowObjectDisposed();
-            }
+            ThrowIfDisposed();
 
 #if DEBUG
             Generation++;
 #endif
+
+            _allocationFailureListener = null;
+            AllocationFailedMultiListener = null;
 
             Array.Clear(_internalReusableStringPoolCount, 0, _internalReusableStringPoolCount.Length);
             foreach (var stack in _internalReusableStringPool)
@@ -864,6 +838,8 @@ namespace Sparrow.Server
             _wholeSegments.Clear();
             _wholeSegments.Add(_internalCurrent);
             _wholeSegments.Add(_externalCurrent);
+
+            _allocationFailureListener = null;
         }
 
         internal int NumberOfReadyToUseMemorySegments => _internalReadyToUseMemorySegments?.Count ?? 0;
@@ -923,26 +899,19 @@ namespace Sparrow.Server
             return r;
         }
 
-        private sealed class ByteStringMemoryManager<T> : MemoryManager<T> where T : unmanaged
+        private sealed class ByteStringMemoryManager<T>(ByteStringContext<TAllocator> context, ByteString str) : MemoryManager<T>
+            where T : unmanaged
         {
-            private readonly ByteStringContext<TAllocator> _context;
-            private ByteString _str;
-            public ByteStringMemoryManager(ByteStringContext<TAllocator> context, ByteString str)
-            {
-                _context = context;
-                _str = str;
-            }
+            public override Memory<T> Memory => CreateMemory(str.Length);
 
-            public override Memory<T> Memory => CreateMemory(_str.Length);
-
-            public override Span<T> GetSpan() => new Span<T>(_str.Ptr, _str.Length);
+            public override Span<T> GetSpan() => new(str.Ptr, str.Length);
 
             public override MemoryHandle Pin(int elementIndex = 0)
             {
-                if (elementIndex < 0 || elementIndex >= _str.Length / sizeof(T))
+                if (elementIndex < 0 || elementIndex >= str.Length / sizeof(T))
                     throw new ArgumentOutOfRangeException(nameof(elementIndex));
 
-                return new MemoryHandle(_str._pointer + (elementIndex * sizeof(T)));
+                return new MemoryHandle(str._pointer + (elementIndex * sizeof(T)));
             }
 
             public override void Unpin()
@@ -951,7 +920,7 @@ namespace Sparrow.Server
 
             protected override void Dispose(bool disposing)
             {
-                _context.Release(ref _str);
+                context.Release(ref str);
             }
         }
 
@@ -1081,8 +1050,7 @@ namespace Sparrow.Server
 
         private ByteString AllocateInternal(int length, ByteStringType type)
         {
-            if (_disposed)
-                ThrowObjectDisposed();
+            ThrowIfDisposed();
 
             Debug.Assert((type & ByteStringType.External) == 0, "This allocation routine is only for use with internal storage byte strings.");
             type &= ~ByteStringType.External; // We are allocating internal, so we will force it (even if we are checking for it in debug).
@@ -1308,8 +1276,7 @@ namespace Sparrow.Server
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void ReleaseExternal(ref ByteString value)
         {
-            if (_disposed)
-                ThrowObjectDisposed();
+            ThrowIfDisposed();
 
             Debug.Assert(value._pointer != null, "Pointer cannot be null. You have a defect in your code.");
 
@@ -1352,8 +1319,7 @@ namespace Sparrow.Server
 
         public void Release(ref ByteString value)
         {
-            if (_disposed)
-                ThrowObjectDisposed();
+            ThrowIfDisposed();
 
 #if DEBUG
             Debug.Assert(value.Generation == Generation, "value.Generation == Generation");
@@ -1409,38 +1375,54 @@ namespace Sparrow.Server
 
         private SegmentInformation AllocateSegment(int size)
         {
-            var memorySegment = Allocator.Allocate(size, AllocationFailed);
-            if (memorySegment.Segment == null)
-                ThrowInvalidMemorySegmentOnAllocation();
+            try
+            {
+                var memorySegment = Allocator.Allocate(size);
+                if (memorySegment.Segment == null)
+                    ThrowInvalidMemorySegmentOnAllocation();
 
-            _totalAllocated += memorySegment.Size;
+                _totalAllocated += memorySegment.Size;
 
-            byte* start = memorySegment.Segment;
-            byte* end = start + memorySegment.Size;
+                byte* start = memorySegment.Segment;
+                byte* end = start + memorySegment.Size;
 
-            var segment = new SegmentInformation(memorySegment, start, end, true);
-            _wholeSegments.Add(segment);
+                var segment = new SegmentInformation(memorySegment, start, end, true);
+                _wholeSegments.Add(segment);
 
-            return segment;
+                return segment;
+            }
+            catch
+            {
+                _allocationFailureListener?.OnAllocationFailure(this);
+                AllocationFailedMultiListener?.Invoke();
+
+                throw;
+            }
         }
 
         [DoesNotReturn]
         private void ThrowInvalidMemorySegmentOnAllocation()
         {
-            AllocationFailed?.Invoke();
-            throw new InvalidOperationException("Allocate gave us a segment that was already disposed.");
+            _allocationFailureListener?.OnAllocationFailure(this);
+            AllocationFailedMultiListener?.Invoke();
+            
+            Throw<InvalidOperationException>("Allocate gave us a segment that was already disposed.");
         }
 
-        [DoesNotReturn]
-        private void ThrowObjectDisposed()
+        private void ThrowIfDisposed()
         {
-            AllocationFailed?.Invoke();
-            throw new ObjectDisposedException("ByteStringContext");
+            if (IsDisposed)
+            {
+                _allocationFailureListener?.OnAllocationFailure(this);
+                AllocationFailedMultiListener?.Invoke();
+                
+                Throw(this, $"The {nameof(ByteStringContext)} has been disposed.");
+            }
         }
 
         private void AllocateExternalSegment(int size)
         {
-            var memorySegment = Allocator.Allocate(size, AllocationFailed);
+            var memorySegment = Allocator.Allocate(size);
 
             _totalAllocated += memorySegment.Size;
 
@@ -1457,8 +1439,7 @@ namespace Sparrow.Server
         {
             Debug.Assert(value._pointer != null, "ByteString cant be null.");
 
-            if (_disposed)
-                ThrowObjectDisposed();
+            ThrowIfDisposed();
 
             if (bytesToSkip < 0)
                 throw new ArgumentException($"'{nameof(bytesToSkip)}' cannot be smaller than 0.");
@@ -1476,11 +1457,9 @@ namespace Sparrow.Server
 
         public ByteString Slice(ByteString value, int offset, int size, ByteStringType type = ByteStringType.Mutable)
         {
-            Debug.Assert(value._pointer != null, "ByteString cant be null.");
-
-            if (_disposed)
-                ThrowObjectDisposed();
-
+            PortableExceptions.ThrowIfNull(value._pointer);
+            ThrowIfDisposed();
+            
             if (offset < 0)
                 throw new ArgumentException($"'{nameof(offset)}' cannot be smaller than 0.");
 
@@ -1772,16 +1751,10 @@ namespace Sparrow.Server
             }
         }
 
-        public struct InternalScope : IDisposable
+        public struct InternalScope(ByteStringContext<TAllocator> parent, ByteString str) : IDisposable
         {
-            private ByteStringContext<TAllocator> _parent;
-            private ByteString _str;
-
-            public InternalScope(ByteStringContext<TAllocator> parent, ByteString str)
-            {
-                _parent = parent;
-                _str = str;
-            }
+            private ByteStringContext<TAllocator> _parent = parent;
+            private ByteString _str = str;
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Dispose()
@@ -1808,16 +1781,10 @@ namespace Sparrow.Server
             }
         }
 
-        public struct ExternalScope : IDisposable
+        public struct ExternalScope(ByteStringContext<TAllocator> parent, ByteString str) : IDisposable
         {
-            private ByteStringContext<TAllocator> _parent;
-            private ByteString _str;
-
-            public ExternalScope(ByteStringContext<TAllocator> parent, ByteString str)
-            {
-                _parent = parent;
-                _str = str;
-            }
+            private ByteStringContext<TAllocator> _parent = parent;
+            private ByteString _str = str;
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Dispose()
@@ -1834,9 +1801,7 @@ namespace Sparrow.Server
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public ExternalScope FromPtr(byte* valuePtr, int size,
-            ByteStringType type,
-            out ByteString str)
+        public ExternalScope FromPtr(byte* valuePtr, int size, ByteStringType type, out ByteString str)
         {
             Debug.Assert(valuePtr != null || size == 0, $"{nameof(valuePtr)} cant be null if the size is not zero");
             Debug.Assert(size >= 0, $"{nameof(size)} cannot be negative.");
@@ -1934,18 +1899,21 @@ namespace Sparrow.Server
 
 #endif
 
-        private bool _disposed;
+        private bool _isDisposed;
+
+        public bool IsDisposed => _isDisposed;
+        
 
         public void Dispose()
         {
             lock (this)
             {
-                if (_disposed)
+                if (_isDisposed)
                     return;
 
                 GC.SuppressFinalize(this);
 
-                _disposed = true;
+                _isDisposed = true;
 
 
                 foreach (var segment in _wholeSegments)
@@ -1955,6 +1923,8 @@ namespace Sparrow.Server
 
                 _wholeSegments.Clear();
                 _internalReadyToUseMemorySegments.Clear();
+
+                AllocationFailedMultiListener = null;
             }
         }
 
@@ -1968,8 +1938,7 @@ namespace Sparrow.Server
             _totalAllocated -= segment.Size;
 
             // Check if we can release this memory segment back to the pool.
-            if (segment.Memory.Size > ByteStringContext.MaxAllocationBlockSizeInBytes ||
-                _lowMemoryFlag)
+            if (segment.Memory.Size > ByteStringContext.MaxAllocationBlockSizeInBytes || _lowMemoryFlag)
             {
                 segment.Memory.Dispose();
             }
@@ -1977,6 +1946,16 @@ namespace Sparrow.Server
             {
                 Allocator.Free(segment.Memory);
             }
+        }
+        
+        public void RegisterListener(INotifyAllocationFailure listener)
+        {
+            Debug.Assert(listener != null);
+
+            if (_allocationFailureListener is null)
+                _allocationFailureListener = listener;
+            else
+                AllocationFailedMultiListener += () => listener.OnAllocationFailure(this);
         }
     }
 

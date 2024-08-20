@@ -1,23 +1,21 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 //  <copyright file="TreeRenaming.cs" company="Hibernating Rhinos LTD">
 //      Copyright (c) Hibernating Rhinos LTD. All rights reserved.
 //  </copyright>
 // -----------------------------------------------------------------------
 
 using System;
+using Tests.Infrastructure;
 using Xunit;
 using Voron.Global;
 using Xunit.Abstractions;
 
+
 namespace FastTests.Voron.Trees
 {
-    public class TreeRenaming : StorageTest
+    public class TreeRenaming(ITestOutputHelper output) : StorageTest(output)
     {
-        public TreeRenaming(ITestOutputHelper output) : base(output)
-        {
-        }
-
-        [Fact]
+        [RavenFact(RavenTestCategory.Voron)]
         public void CanRenameTree()
         {
             using (var tx = Env.WriteTransaction())
@@ -53,7 +51,7 @@ namespace FastTests.Voron.Trees
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Voron)]
         public void ShouldNotAllowToRenameTreeIfTreeAlreadyExists()
         {
             using (var tx = Env.WriteTransaction())
@@ -63,22 +61,22 @@ namespace FastTests.Voron.Trees
 
                 var ae = Assert.Throws<ArgumentException>(() => tx.RenameTree("tree_1", "tree_2"));
 
-                Assert.Equal("Cannot rename a tree with the name of an existing tree: tree_2", ae.Message);
+                Assert.StartsWith("Cannot rename a tree with the name of an existing tree: tree_2", ae.Message);
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Voron)]
         public void ShouldThrowIfTreeDoesNotExist()
         {
             using (var tx = Env.WriteTransaction())
             {
                 var ae = Assert.Throws<ArgumentException>(() => tx.RenameTree( "tree_1", "tree_2"));
 
-                Assert.Equal("Tree tree_1 does not exists", ae.Message);
+                Assert.StartsWith("Tree tree_1 does not exists", ae.Message);
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Voron)]
         public void MustNotRenameToRootAndFreeSpaceRootTrees()
         {
             using (var tx = Env.WriteTransaction())
@@ -88,12 +86,12 @@ namespace FastTests.Voron.Trees
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Voron)]
         public void ShouldPreventFromRenamingTreeInReadTransaction()
         {
             using (var tx = Env.ReadTransaction())
             {
-                var ae = Assert.Throws<ArgumentException>(() => tx.RenameTree( "tree_1", "tree_2"));
+                var ae = Assert.Throws<InvalidOperationException>(() => tx.RenameTree( "tree_1", "tree_2"));
 
                 Assert.Equal("Cannot rename a new tree with a read only transaction", ae.Message);
             }
