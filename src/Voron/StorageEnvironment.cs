@@ -1366,7 +1366,8 @@ namespace Voron
                     RootPages = tx.RootObjects.State.Header.PageCount,
                     UnallocatedPagesAtEndOfFile = tx.DataPagerState.NumberOfAllocatedPages - NextPageNumber,
                     UsedDataFileSizeInBytes = (_currentStateRecord.NextPageNumber - 1) * Constants.Storage.PageSize,
-                    AllocatedDataFileSizeInBytes = numberOfAllocatedPages * Constants.Storage.PageSize,
+                    AllocatedDataFileSizeInBytes = tx.DataPagerState.TotalDiskSpace,
+                    AllocatedDiskSpaceInBytes = numberOfAllocatedPages * Constants.Storage.PageSize,
                     CommittedTransactionId = CurrentReadTransactionId,
                 };
             }
