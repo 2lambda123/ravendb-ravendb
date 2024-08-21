@@ -52,7 +52,6 @@ namespace Raven.Server.Documents
         public TableSchema TombstonesSchema;
 
         protected TableSchema AttachmentsSchema;
-        //public TableSchema RetiredAttachmentsSchema;
         protected TableSchema ConflictsSchema;
         public TableSchema CountersSchema;
         public TableSchema CounterTombstonesSchema;
@@ -2824,6 +2823,7 @@ namespace Raven.Server.Documents
         {
             return new DateTime(*(long*)tvr.Read(index, out _), DateTimeKind.Utc);
         }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static DateTime? TableValueToNullableDateTime(int index, ref TableValueReader tvr)
         {
