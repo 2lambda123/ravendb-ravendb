@@ -27,7 +27,6 @@ public unsafe partial class Pager : IDisposable
     public readonly string FileName;
     public readonly StorageEnvironmentOptions Options;
     private readonly Pal.OpenFileFlags _flags;
-
     private readonly StateFor32Bits? _32BitsState;
 
     private class StateFor32Bits
@@ -44,12 +43,6 @@ public unsafe partial class Pager : IDisposable
     private DateTime _lastIncrease;
     private long _increaseSize;
 
-    /// <summary>
-    /// This determines whatever we'll attempt to lock the memory,
-    /// so it will not go to the swap / core dumps
-    /// </summary>
-    private readonly bool _lockMemory;
-
     private const int MinIncreaseSize = 16 * Constants.Size.Kilobyte;
     private const int MaxIncreaseSize = Constants.Size.Gigabyte;
 
@@ -61,6 +54,7 @@ public unsafe partial class Pager : IDisposable
         if (result != PalFlags.FailCodes.Success)
             RaiseError(filename, error, result, initialFileSize);
         var state = new State(pager, readOnlyMemory, writeMemory, memorySize, handle);
+        (state.TotalFileSize, state.TotalDiskSpace) = pager.GetFileSize(state);
         pager.InstallState(state);
         pager.Initialize(memorySize);
         return (pager, state);
@@ -587,5 +581,25 @@ public unsafe partial class Pager : IDisposable
     public byte* MakeWritable(State state, byte* ptr)
     {
         return _functions.ConvertToWritePointer(this, state, ptr);
+    }
+
+    public void SetSparseRange(State state, long offset, long size)
+    {
+        var rc = Pal.rvn_pager_set_sparse_region(state.Handle, offset, size, out int errorCode);
+
+        if (rc is PalFlags.FailCodes.Success or
+            PalFlags.FailCodes.FailSparseNotSupported)  // explicitly ignoring this
+            return;
+        
+        PalHelper.ThrowLastError(rc, errorCode, "Failed to set sparse range on " + state.Pager.FileName);
+    }
+
+    public (long AllocatedSize, long PhysicalSize) GetFileSize(State state)
+    {
+        var rc = Pal.rvn_pager_get_file_size(state.Handle, out var totalSize, out var physicalSize, out var errorCode);
+        if (rc is not PalFlags.FailCodes.Success)
+            PalHelper.ThrowLastError(rc, errorCode, "Failed to get file size for " + state.Pager.FileName);
+
+        return (totalSize, physicalSize);
     }
 }

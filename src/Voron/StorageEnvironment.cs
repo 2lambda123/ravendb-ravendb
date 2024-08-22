@@ -157,6 +157,7 @@ namespace Voron
                     null, 
                     -1,
                     (null, -1),
+                    null, 
                     null);
                 
                 _lastValidPageAfterLoad = dataPagerState.NumberOfAllocatedPages;
@@ -359,6 +360,11 @@ namespace Voron
                 {
                     // save the new database id
                     metadataTree?.Add("db-id", DbId.ToByteArray());
+                }
+
+                foreach (long freeSegment in _freeSpaceHandling.GetAllFullyEmptySegments(tx))
+                {
+                    tx.RecordSparseRange(freeSegment);
                 }
 
                 tx.Commit();
@@ -1360,7 +1366,8 @@ namespace Voron
                     RootPages = tx.RootObjects.State.Header.PageCount,
                     UnallocatedPagesAtEndOfFile = tx.DataPagerState.NumberOfAllocatedPages - NextPageNumber,
                     UsedDataFileSizeInBytes = (_currentStateRecord.NextPageNumber - 1) * Constants.Storage.PageSize,
-                    AllocatedDataFileSizeInBytes = numberOfAllocatedPages * Constants.Storage.PageSize,
+                    AllocatedDataFileSizeInBytes = tx.DataPagerState.TotalDiskSpace,
+                    AllocatedDiskSpaceInBytes = numberOfAllocatedPages * Constants.Storage.PageSize,
                     CommittedTransactionId = CurrentReadTransactionId,
                 };
             }
@@ -1598,7 +1605,8 @@ namespace Voron
                 ScratchPagesTable = tx.ModifiedPagesInTransaction,
                 NextPageNumber = tx.GetNextPageNumber(),
                 Root = tx.RootObjects.State,
-                DataPagerState = tx.DataPagerState
+                DataPagerState = tx.DataPagerState,
+                SparsePageRanges = tx.GetSparsePageRanges()
             };
 
             // we don't _have_ to make it using interlocked, but let's publish it immediately
@@ -1612,31 +1620,42 @@ namespace Voron
             }
         }
 
-        private readonly List<PageFromScratchBuffer> _cachedBuffer = [];
+        private readonly List<PageFromScratchBuffer> _cachedScratchBuffers = [];
+        private readonly List<long> _cachedSparseRegionsList = [];
 
-        internal bool TryGetLatestEnvironmentStateToFlush(long uptoTxIdExclusive, out List<PageFromScratchBuffer> bufferOfPageFromScratchBuffersToFree, out EnvironmentStateRecord record)
+        internal ApplyLogsToDataFileState TryGetLatestEnvironmentStateToFlush(long uptoTxIdExclusive)
         {
             if (uptoTxIdExclusive == 0)
                 uptoTxIdExclusive = long.MaxValue;
 
-            _cachedBuffer.Clear();
-            bufferOfPageFromScratchBuffersToFree = _cachedBuffer;
-            
-            record = default;
+            var scratchBuffers = _cachedScratchBuffers;
+            scratchBuffers.Clear();
+            var sparseRegions = _cachedSparseRegionsList;
+            sparseRegions.Clear();
             bool found = false;
+            EnvironmentStateRecord record = null;
             while (true)
             {
-                if (_transactionsToFlush.TryPeek(out var maybe) == false || 
+                if (_transactionsToFlush.TryPeek(out var maybe) == false ||
                     maybe.TransactionId >= uptoTxIdExclusive)
-                    return found;
+                {
+                    if (found == false)
+                        return null;
+                    Debug.Assert(record is not null);
+                    return new ApplyLogsToDataFileState(scratchBuffers, sparseRegions, record);
+                }
                 if (_transactionsToFlush.TryDequeue(out record) == false)
                     throw new InvalidOperationException("Failed to get transaction to flush after already peeked successfully");
 
+                if (record.SparsePageRanges != null)
+                {
+                    sparseRegions.AddRange(record.SparsePageRanges);
+                }
                 foreach (var (_, pageFromScratch) in record.ScratchPagesTable)
                 {
                     if (pageFromScratch.AllocatedInTransaction != record.TransactionId)
                         continue;
-                    bufferOfPageFromScratchBuffersToFree.Add(pageFromScratch);
+                    scratchBuffers.Add(pageFromScratch);
                 }
 
                 // single thread is reading from this, so we can be sure that peek + take gets the same value

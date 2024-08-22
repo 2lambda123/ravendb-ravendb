@@ -28,6 +28,7 @@ struct handle
     uint64_t allocation_size;
     int file_fd;
     int32_t open_flags;
+    int32_t status_flags;
 };
 
 int32_t rvn_lock_memory(int32_t open_flags, void *mem, int64_t size, int32_t *detailed_error_code)
@@ -334,6 +335,57 @@ int32_t rvn_pager_get_file_handle(
     return SUCCESS;
 }
 
+EXPORT int32_t
+rvn_pager_get_file_size(void* handle,
+    int64_t* total_size,
+    int64_t* phyiscal_size,
+    int32_t* detailed_error_code)
+{
+    struct handle *handle_ptr = handle;
+    struct stat st;
+    if(fstat(handle_ptr->file_fd, &st) == -1)
+    {
+        *detailed_error_code = errno;
+        return FAIL_GET_FILE_SIZE;
+    }
+    *total_size = st.st_size;
+    *phyiscal_size = st.st_blocks * 512;
+    return SUCCESS;
+}
+
+EXPORT int32_t
+rvn_pager_set_sparse_region(void* handle,
+    int64_t offset,
+    int64_t size,
+    int32_t* detailed_error_code)
+{
+    struct handle *handle_ptr = handle;
+    if(handle_ptr->status_flags & PAGER_STATUS_SPARSE_NOT_SUPPORTED)
+    {
+        return FAIL_SPARSE_NOT_SUPPORTED;
+    }
+    int rc;
+
+#if __APPLE__
+    fpunchhole_t punchhole = {0};
+    punchhole.fp_offset = offset;
+    punchhole.fp_length = size;
+    rc = fcntl(handle_ptr->file_fd, F_PUNCHHOLE, &punchhole);
+#else
+    rc = fallocate(handle_ptr->file_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, size);
+#endif
+    if(rc == 0)
+        return SUCCESS;
+
+    if(errno == ENOTSUP)
+    {
+        handle_ptr->status_flags |= PAGER_STATUS_SPARSE_NOT_SUPPORTED;
+        return FAIL_SPARSE_NOT_SUPPORTED;
+    }
+
+    *detailed_error_code = errno;
+    return FAIL_SET_SPARSE_RANGE;
+}
 
 EXPORT
 int32_t rvn_unmap_memory(

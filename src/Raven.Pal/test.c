@@ -12,6 +12,8 @@ void main() {
     void* wmem;
     int64_t size;
     int32_t err;
-    int rc = rvn_init_pager("test.db", 0, OPEN_FILE_TEMPORARY | OPEN_FILE_ENCRYPTED | OPEN_FILE_WRITABLE_MAP | OPEN_FILE_LOCK_MEMORY, &handle, &mem, &wmem, &size, &err);
-    rvn_increase_pager_size(handle, 2147483648, &handle, &mem, &wmem, &size, &err);
+    int rc = rvn_init_pager(L"test.db", 1024*1024*64, OPEN_FILE_NONE, &handle, &mem, &wmem, &size, &err);
+    rc = rvn_pager_set_sparse_region(handle, 1024*1024, 1024*1024*8, &err);
+    int64_t t, p;
+    rc = rvn_pager_get_file_size(handle, &t, &p, &err);
 }
