@@ -160,15 +160,32 @@ public sealed class MergedBatchCommand : TransactionMergedCommand
                     break;
 
                 case CommandType.AttachmentPUT:
-                    attachmentIterator.MoveNext();
-                    var attachmentStream = attachmentIterator.Current;
-                    var stream = attachmentStream.Stream;
-                    _toDispose.Add(stream);
-
                     var docId = EtlGetDocIdFromPrefixIfNeeded(cmd.Id, cmd, lastPutResult);
 
-                    var attachmentPutResult = Database.DocumentsStorage.AttachmentsStorage.PutAttachment(context, docId, cmd.Name,
-                        cmd.ContentType, attachmentStream.Hash, cmd.ChangeVector, stream, updateDocument: false, extractCollectionName: ModifiedCollections is not null);
+                    //TODO: egor do here something normal and don't pass so many params and flags 
+
+                    AttachmentDetailsServer attachmentPutResult;
+                    if (cmd.FromEtl)
+                    {
+                        if (cmd.Flags.Contain(AttachmentFlags.Retired) == false)
+                        {
+                            AttachmentStream attachmentStream = GetAttachmentStream(attachmentIterator, out Stream stream);
+                            attachmentPutResult = Database.DocumentsStorage.AttachmentsStorage.PutAttachment(context, docId, cmd.Name,
+                                cmd.ContentType, attachmentStream.Hash, cmd.Flags, cmd.Size, cmd.RetiredAt, cmd.ChangeVector, stream, updateDocument: false, extractCollectionName: ModifiedCollections is not null, fromEtl: cmd.FromEtl);
+                        }
+                        else
+                        {
+                            attachmentPutResult = Database.DocumentsStorage.AttachmentsStorage.PutAttachment(context, docId, cmd.Name,
+                                cmd.ContentType, cmd.Hash, cmd.Flags, cmd.Size, cmd.RetiredAt, cmd.ChangeVector, stream: null, updateDocument: false, extractCollectionName: ModifiedCollections is not null, fromEtl: cmd.FromEtl);
+                        }
+                    }
+                    else
+                    {
+                        AttachmentStream attachmentStream = GetAttachmentStream(attachmentIterator, out Stream stream);
+                        attachmentPutResult = Database.DocumentsStorage.AttachmentsStorage.PutAttachment(context, docId, cmd.Name,
+                            cmd.ContentType, attachmentStream.Hash, flags: AttachmentFlags.None, stream.Length, retireAtDt: null, cmd.ChangeVector, stream, updateDocument: false, extractCollectionName: ModifiedCollections is not null);
+                    }
+
                     LastChangeVector = attachmentPutResult.ChangeVector;
 
                     var apReply = new DynamicJsonValue
@@ -494,6 +511,15 @@ public sealed class MergedBatchCommand : TransactionMergedCommand
             Debug.Assert(Reply.Count == 0);
 
         return Reply.Count;
+    }
+
+    private AttachmentStream GetAttachmentStream(IEnumerator<AttachmentStream> attachmentIterator, out Stream stream)
+    {
+        attachmentIterator.MoveNext();
+        var attachmentStream = attachmentIterator.Current;
+        stream = attachmentStream.Stream;
+        _toDispose.Add(stream);
+        return attachmentStream;
     }
 
     public override IReplayableCommandDto<DocumentsOperationContext, DocumentsTransaction, DocumentMergedTransactionCommand> ToDto(DocumentsOperationContext context)
