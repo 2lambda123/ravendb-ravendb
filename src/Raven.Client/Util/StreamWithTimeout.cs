@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,6 +11,11 @@ namespace Raven.Client.Util
         private static readonly TimeSpan DefaultWriteTimeout = TimeSpan.FromSeconds(120);
         internal static TimeSpan DefaultReadTimeout { get; } = TimeSpan.FromSeconds(120);
 
+        private static readonly long MinimumWriteDelayTimeInMs = (long)(DefaultWriteTimeout.TotalMilliseconds / 3);
+        private static readonly long MinimumReadDelayTimeInMs = (long)(DefaultReadTimeout.TotalMilliseconds / 3);
+        private Stopwatch _writeSw;
+        private Stopwatch _readSw;
+
         private readonly Stream _stream;
         private int _writeTimeout;
         private int _readTimeout;
@@ -17,6 +23,11 @@ namespace Raven.Client.Util
         private bool _canBaseStreamTimeoutOnRead;
         private CancellationTokenSource _writeCts;
         private CancellationTokenSource _readCts;
+
+#if DEBUG
+        private CancellationToken _requestReadCts;
+        private CancellationToken _requestWriteCts;
+#endif
 
         private long _totalRead = 0;
         private long _totalWritten = 0;
@@ -154,9 +165,26 @@ namespace Raven.Client.Util
 
         private async Task<int> ReadAsyncWithTimeout(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         {
-            _readCts?.Dispose();
-            _readCts = cancellationToken == default ? new CancellationTokenSource() : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _readCts.CancelAfter(_readTimeout);
+            if (_readCts == null)
+            {
+                _readCts = cancellationToken == default ? new CancellationTokenSource() : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                _readCts.CancelAfter(_readTimeout);
+                _readSw = Stopwatch.StartNew();
+
+#if DEBUG
+                _requestReadCts = cancellationToken;
+#endif
+            }
+            else if (_readSw.ElapsedMilliseconds > MinimumWriteDelayTimeInMs)
+            {
+                _readSw.Restart();
+                _readCts.CancelAfter(_readTimeout);
+
+#if DEBUG
+                if (_requestReadCts != cancellationToken)
+                    throw new InvalidOperationException("The cancellation token was changed during the request");
+#endif
+            }
 
             var read = await _stream.ReadAsync(buffer, offset, count, _readCts.Token).ConfigureAwait(false);
             _totalRead += read;
@@ -195,9 +223,26 @@ namespace Raven.Client.Util
 
         private Task WriteAsyncWithTimeout(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         {
-            _writeCts?.Dispose();
-            _writeCts = cancellationToken == default ? new CancellationTokenSource() : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _writeCts.CancelAfter(_writeTimeout);
+            if (_writeCts == null)
+            {
+                _writeCts = cancellationToken == default ? new CancellationTokenSource() : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                _writeCts.CancelAfter(_writeTimeout);
+                _writeSw = Stopwatch.StartNew();
+
+#if DEBUG
+                _requestWriteCts = cancellationToken;
+#endif
+            }
+            else if (_writeSw.ElapsedMilliseconds > MinimumReadDelayTimeInMs)
+            {
+                _writeSw.Restart();
+                _writeCts.CancelAfter(_writeTimeout);
+
+#if DEBUG
+                if (_requestWriteCts != cancellationToken)
+                    throw new InvalidOperationException("The cancellation token was changed during the request");
+#endif
+            }
 
             return _stream.WriteAsync(buffer, offset, count, _writeCts.Token);
         }
